@@ -45,6 +45,7 @@ function detectCommand(text) {
   if (t === '今日狀況') return { type: 'today' };
   if (t === '週報')     return { type: 'weekly' };
   if (t === '說明' || t === 'help') return { type: 'help' };
+  if (t === '我的ID' || t === 'myid') return { type: 'myid' };
 
   // @姓名 狀況
   const personMatch = t.match(/^@(.+?)\s*狀況$/);
@@ -58,8 +59,9 @@ async function handleCommand(text, userId) {
   const cmd = detectCommand(text);
   if (!cmd) return null;
 
-  // 說明指令所有人都可以使用
+  // 所有人都可以使用的指令
   if (cmd.type === 'help') return HELP_TEXT;
+  if (cmd.type === 'myid') return `你的 LINE User ID 是：\n${userId}`;
 
   // 其他查詢指令僅限主管
   if (userId !== process.env.ADMIN_LINE_USER_ID) {
