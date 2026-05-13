@@ -40,14 +40,20 @@ function isWorkLog(text) {
 // 取得小編顯示名稱
 // ============================================================
 
-// 優先查 Sheets 成員名單，查不到則用 LINE 個人資料名稱
-async function getMemberDisplayName(userId, client) {
+// 優先查 Sheets 成員名單，查不到則依來源類型呼叫對應 LINE API
+async function getMemberDisplayName(userId, client, source) {
   try {
     const sheetName = await getMemberName(userId);
     if (sheetName) return sheetName;
 
-    // 群組/聊天室情境下 getProfile 仍適用個人 userId
-    const profile = await client.getProfile(userId);
+    let profile;
+    if (source && source.type === 'group') {
+      profile = await client.getGroupMemberProfile(source.groupId, userId);
+    } else if (source && source.type === 'room') {
+      profile = await client.getRoomMemberProfile(source.roomId, userId);
+    } else {
+      profile = await client.getProfile(userId);
+    }
     return profile.displayName || '未知用戶';
   } catch (err) {
     console.error('取得成員名稱失敗：', err.message);
@@ -101,7 +107,7 @@ function buildAnomalyReply(memberName, analysis, parsedLog) {
 // ============================================================
 // 工作日誌處理流程
 // ============================================================
-async function processWorkLog(text, userId, client) {
+async function processWorkLog(text, userId, client, source) {
   // Step 1：解析格式
   const parsedLog = parseWorkLog(text);
   if (parsedLog.error) {
@@ -109,7 +115,7 @@ async function processWorkLog(text, userId, client) {
   }
 
   // Step 2：取得小編名稱
-  const memberName = await getMemberDisplayName(userId, client);
+  const memberName = await getMemberDisplayName(userId, client, source);
 
   // Step 3：Claude 分析
   const analysis = await analyzeWorkLog(parsedLog, memberName);
@@ -159,6 +165,7 @@ async function handleEvent(event, client) {
   const text       = event.message.text;
   const replyToken = event.replyToken;
   const userId     = event.source.userId;
+  const source     = event.source;
 
   let replyText;
 
@@ -168,7 +175,7 @@ async function handleEvent(event, client) {
     if (cmdReply) {
       replyText = cmdReply;
     } else if (isWorkLog(text)) {
-      replyText = await processWorkLog(text, userId, client);
+      replyText = await processWorkLog(text, userId, client, source);
     } else {
       // 不認識的訊息，顯示提示
       replyText = [
