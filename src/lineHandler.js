@@ -36,16 +36,21 @@ function isWorkLog(text) {
     && text.includes('時間記錄');
 }
 
-// 請假 / 補休（靜默記錄，不回覆）
-// 格式：明天請假、明天補休半天、明天補休 X 小時
+// 請假 / 補休 / 當天臨時請假（靜默記錄，不回覆）
+// 明天格式：明天請假、明天補休半天、明天補休 X 小時
+// 當天格式：今日病假、今日事假
 function parseLeaveRequest(text) {
   if (!text) return null;
   const t = text.trim();
-  if (t === '明天請假') return { leaveType: '請假', hours: null };
+  // 當天臨時請假（isToday = true，記錄今天日期）
+  if (t === '今日病假') return { leaveType: '病假', hours: null, isToday: true };
+  if (t === '今日事假') return { leaveType: '事假', hours: null, isToday: true };
+  // 隔天預告請假
+  if (t === '明天請假') return { leaveType: '請假', hours: null, isToday: false };
   const halfMatch = t.match(/^明天補休半天$/);
-  if (halfMatch) return { leaveType: '補休', hours: 0.5 };
+  if (halfMatch) return { leaveType: '補休', hours: 0.5, isToday: false };
   const hoursMatch = t.match(/^明天補休\s*(\d+(?:\.\d+)?)\s*小時$/);
-  if (hoursMatch) return { leaveType: '補休', hours: parseFloat(hoursMatch[1]) };
+  if (hoursMatch) return { leaveType: '補休', hours: parseFloat(hoursMatch[1]), isToday: false };
   return null;
 }
 
@@ -170,10 +175,10 @@ async function processSpecialDayLog(text, userId, client, source, specialDay) {
 async function processLeaveRequest(text, userId, client, source, leaveInfo) {
   const memberName = await getMemberDisplayName(userId, client, source);
 
-  // 計算明天的台灣日期
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const leaveDate  = getTaiwanDateString(tomorrow);
+  // 當天臨時請假用今天，隔天預告請假用明天
+  const targetDate = new Date();
+  if (!leaveInfo.isToday) targetDate.setDate(targetDate.getDate() + 1);
+  const leaveDate  = getTaiwanDateString(targetDate);
   const submitTime = getTaiwanTimeString();
 
   await saveLeaveRecord({
