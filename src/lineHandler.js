@@ -176,25 +176,13 @@ async function handleEvent(event, client) {
       replyText = cmdReply;
     } else if (isWorkLog(text)) {
       replyText = await processWorkLog(text, userId, client, source);
-    } else {
-      // 不認識的訊息，顯示提示
-      replyText = [
-        `👋 嗨！`,
-        ``,
-        `如要提交今日工作日誌，請依格式回報：`,
-        ``,
-        `今日類型：正常日`,
-        `影片數量：3`,
-        `時間記錄：`,
-        `09:00-10:30 任務名稱`,
-        ``,
-        `輸入「說明」查看完整格式與指令。`,
-      ].join('\n');
     }
   } catch (err) {
     console.error('handleEvent 發生錯誤：', err);
     replyText = '⚠️ 系統發生錯誤，請稍後再試。\n若問題持續，請聯絡管理員。';
   }
+
+  if (!replyText) return;
 
   await client.replyMessage({
     replyToken,
