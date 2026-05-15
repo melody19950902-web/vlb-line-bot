@@ -3,6 +3,8 @@ require('dotenv').config();
 const express = require('express');
 const line    = require('@line/bot-sdk');
 const { handleEvent } = require('./lineHandler');
+const { sendDailySummary } = require('./notifier');
+const { getTaiwanTimeString } = require('./sheets');
 
 // ============================================================
 // 啟動前驗證必要環境變數
@@ -16,26 +18,23 @@ for (const key of REQUIRED_ENV) {
 }
 
 // ============================================================
-// LINE 設定與客戶端初始化
+// LINE 客戶端
 // ============================================================
 const lineConfig = {
   channelAccessToken: process.env.LINE_CHANNEL_ACCESS_TOKEN,
   channelSecret:      process.env.LINE_CHANNEL_SECRET,
 };
 
-// LINE Messaging API 客戶端（用於回覆與推播）
 const client = new line.messagingApi.MessagingApiClient({
   channelAccessToken: lineConfig.channelAccessToken,
 });
 
 // ============================================================
-// Express 伺服器設定
+// Express 伺服器
 // ============================================================
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
-// LINE Webhook 端點
-// line.middleware 負責驗證簽章（防止偽造請求）並解析 body
 app.post('/webhook',
   line.middleware(lineConfig),
   async (req, res) => {
@@ -49,7 +48,6 @@ app.post('/webhook',
   }
 );
 
-// 健康檢查端點（Render.com 免費方案會定期 ping 防止休眠）
 app.get('/', (req, res) => {
   res.send('✅ VLB LINE Bot 工作查核系統運行中');
 });
@@ -58,3 +56,24 @@ app.listen(PORT, () => {
   console.log(`✅ 伺服器已啟動，監聽連接埠 ${PORT}`);
   console.log(`🤖 VLB 設計部工作查核系統準備就緒`);
 });
+
+// ============================================================
+// 每日 22:30 彙整排程（台灣時間）
+// 每 60 秒檢查一次，同一天只發一次
+// ============================================================
+let lastSummaryDate = '';
+
+setInterval(async () => {
+  try {
+    const now = getTaiwanTimeString();    // "HH:MM"
+    const today = new Date().toLocaleDateString('zh-TW', { timeZone: 'Asia/Taipei' });
+
+    if (now === '22:30' && lastSummaryDate !== today) {
+      lastSummaryDate = today;
+      console.log(`📊 發送每日彙整：${today}`);
+      await sendDailySummary(client);
+    }
+  } catch (err) {
+    console.error('每日彙整發送失敗：', err.message);
+  }
+}, 60 * 1000);

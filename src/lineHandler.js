@@ -1,12 +1,12 @@
 'use strict';
-const { parseWorkLog, analyzeWorkLog }          = require('./analyzer');
-const { saveWorkLog, getMemberName,
-        getTaiwanDateString, getTaiwanTimeString } = require('./sheets');
-const { sendAnomalyAlert }                       = require('./notifier');
-const { handleCommand }                          = require('./commands');
+const { parseWorkLog, analyzeWorkLog, detectSpecialDayType } = require('./analyzer');
+const { saveWorkLog, saveLeaveRecord, getMemberName,
+        getTaiwanDateString, getTaiwanTimeString }           = require('./sheets');
+const { sendAnomalyAlert }                                   = require('./notifier');
+const { handleCommand }                                      = require('./commands');
 
 // ============================================================
-// 格式錯誤提示範本
+// 格式錯誤提示
 // ============================================================
 const FORMAT_ERROR_HINT = `
 請依以下格式重新傳送：
@@ -14,21 +14,21 @@ const FORMAT_ERROR_HINT = `
 今日類型：正常日
 影片數量：3
 時間記錄：
-09:00-10:30 任務名稱
-10:30-11:00 任務名稱
+09:00-10:30 剪輯短影音
+10:30-11:00 發布各平台
 備註：（選填）
 
 工作類型可填：
-正常日、外拍日、直播日
-大型活動日（拍照組）
+正常日、外拍日、直播日、外拍半天、外拍一天
+大型活動日（短影音組）
 大型活動日（限動組）
-大型活動日（剪輯組）`.trim();
+大型活動日（拍照修片組）`.trim();
 
 // ============================================================
-// 判斷訊息類型
+// 訊息類型偵測
 // ============================================================
 
-// 訊息是否包含工作日誌關鍵欄位
+// 完整工作日誌（含三個必要欄位）
 function isWorkLog(text) {
   return text
     && text.includes('今日類型')
@@ -36,16 +36,27 @@ function isWorkLog(text) {
     && text.includes('時間記錄');
 }
 
+// 請假 / 補休（靜默記錄，不回覆）
+// 格式：明天請假、明天補休半天、明天補休 X 小時
+function parseLeaveRequest(text) {
+  if (!text) return null;
+  const t = text.trim();
+  if (t === '明天請假') return { leaveType: '請假', hours: null };
+  const halfMatch = t.match(/^明天補休半天$/);
+  if (halfMatch) return { leaveType: '補休', hours: 0.5 };
+  const hoursMatch = t.match(/^明天補休\s*(\d+(?:\.\d+)?)\s*小時$/);
+  if (hoursMatch) return { leaveType: '補休', hours: parseFloat(hoursMatch[1]) };
+  return null;
+}
+
 // ============================================================
 // 取得小編顯示名稱
 // ============================================================
 
-// 優先查 Sheets 成員名單，查不到則依來源類型呼叫對應 LINE API
 async function getMemberDisplayName(userId, client, source) {
   try {
     const sheetName = await getMemberName(userId);
     if (sheetName) return sheetName;
-
     let profile;
     if (source && source.type === 'group') {
       profile = await client.getGroupMemberProfile(source.groupId, userId);
@@ -65,7 +76,6 @@ async function getMemberDisplayName(userId, client, source) {
 // 回覆訊息格式化
 // ============================================================
 
-// 正常回覆
 function buildNormalReply(memberName, analysis, parsedLog) {
   return [
     `✅ ${memberName} 的工作日誌已收到！`,
@@ -78,28 +88,22 @@ function buildNormalReply(memberName, analysis, parsedLog) {
   ].join('\n');
 }
 
-// 異常或警告回覆
 function buildAnomalyReply(memberName, analysis, parsedLog) {
   const lines = [`⚠️ ${memberName} 的工作日誌已收到`];
-
   lines.push(analysis.video_count_ok
     ? `📹 影片數量：${parsedLog.videoCount} 支 ✓`
     : `📹 影片數量：${parsedLog.videoCount} 支（${parsedLog.dayType}標準未達）`
   );
-
   lines.push(analysis.time_log_ok
     ? `⏱️ 時間記錄：合理 ✓`
     : `⏱️ 時間記錄：發現異常`
   );
-
   lines.push(`📋 今日類型：${parsedLog.dayType}`);
   lines.push(`⏰ 總工時：${analysis.total_hours} 小時`);
-
   if (analysis.anomalies && analysis.anomalies.length > 0) {
     lines.push(``, `異常說明：`);
     analysis.anomalies.forEach(a => lines.push(`• ${a}`));
   }
-
   lines.push(``, `主管已收到通知。`);
   return lines.join('\n');
 }
@@ -107,38 +111,25 @@ function buildAnomalyReply(memberName, analysis, parsedLog) {
 // ============================================================
 // 工作日誌處理流程
 // ============================================================
+
 async function processWorkLog(text, userId, client, source) {
-  // Step 1：解析格式
   const parsedLog = parseWorkLog(text);
   if (parsedLog.error) {
     return `❌ 日誌格式有誤\n\n問題：${parsedLog.error}\n\n${FORMAT_ERROR_HINT}`;
   }
 
-  // Step 2：取得小編名稱
   const memberName = await getMemberDisplayName(userId, client, source);
+  const analysis   = await analyzeWorkLog(parsedLog, memberName);
+  const date       = getTaiwanDateString();
+  const time       = getTaiwanTimeString();
 
-  // Step 3：Claude 分析
-  const analysis = await analyzeWorkLog(parsedLog, memberName);
-
-  // Step 4：取得現在時間
-  const date = getTaiwanDateString();
-  const time = getTaiwanTimeString();
-
-  // Step 5：儲存到 Sheets
   await saveWorkLog({
-    date,
-    time,
-    name:       memberName,
-    lineUserId: userId,
-    dayType:    parsedLog.dayType,
-    videoCount: parsedLog.videoCount,
-    timeLog:    parsedLog.timeLogRaw,
-    status:     analysis.status,
-    anomalies:  analysis.anomalies,
-    notes:      parsedLog.notes,
+    date, time, name: memberName, lineUserId: userId,
+    dayType: parsedLog.dayType, videoCount: parsedLog.videoCount,
+    timeLog: parsedLog.timeLogRaw, status: analysis.status,
+    anomalies: analysis.anomalies, notes: parsedLog.notes,
   });
 
-  // Step 6：異常時通知主管
   if (analysis.status !== 'normal') {
     await sendAnomalyAlert(client, {
       memberName,
@@ -149,17 +140,60 @@ async function processWorkLog(text, userId, client, source) {
     });
   }
 
-  // Step 7：回覆小編
   return analysis.status === 'normal'
     ? buildNormalReply(memberName, analysis, parsedLog)
     : buildAnomalyReply(memberName, analysis, parsedLog);
 }
 
 // ============================================================
+// 特殊工作日處理（簡短格式，直接存為正常狀態）
+// ============================================================
+
+async function processSpecialDayLog(text, userId, client, source, specialDay) {
+  const memberName = await getMemberDisplayName(userId, client, source);
+  const date       = getTaiwanDateString();
+  const time       = getTaiwanTimeString();
+
+  await saveWorkLog({
+    date, time, name: memberName, lineUserId: userId,
+    dayType: specialDay.dayType, videoCount: 0,
+    timeLog: text, status: 'normal', anomalies: [], notes: '',
+  });
+
+  return `✅ ${memberName} 已登記：${specialDay.dayType}`;
+}
+
+// ============================================================
+// 請假處理（靜默記錄，計算隔天日期）
+// ============================================================
+
+async function processLeaveRequest(text, userId, client, source, leaveInfo) {
+  const memberName = await getMemberDisplayName(userId, client, source);
+
+  // 計算明天的台灣日期
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const leaveDate  = getTaiwanDateString(tomorrow);
+  const submitTime = getTaiwanTimeString();
+
+  await saveLeaveRecord({
+    leaveDate,
+    submitTime,
+    name:      memberName,
+    lineUserId: userId,
+    leaveType: leaveInfo.leaveType,
+    hours:     leaveInfo.hours,
+  });
+
+  // 靜默記錄，不回覆任何訊息
+  console.log(`📋 請假記錄：${memberName} ${leaveDate} ${leaveInfo.leaveType}`);
+}
+
+// ============================================================
 // LINE 事件主入口
 // ============================================================
+
 async function handleEvent(event, client) {
-  // 只處理文字訊息
   if (event.type !== 'message' || event.message.type !== 'text') return;
 
   const text       = event.message.text;
@@ -170,12 +204,26 @@ async function handleEvent(event, client) {
   let replyText;
 
   try {
-    // 優先判斷是否為系統指令
+    // 優先判斷系統指令
     const cmdReply = await handleCommand(text, userId);
     if (cmdReply) {
       replyText = cmdReply;
-    } else if (isWorkLog(text)) {
+    }
+    // 請假 / 補休（靜默記錄，不回覆）
+    else if (parseLeaveRequest(text)) {
+      await processLeaveRequest(text, userId, client, source, parseLeaveRequest(text));
+      return; // 不回覆
+    }
+    // 完整工作日誌
+    else if (isWorkLog(text)) {
       replyText = await processWorkLog(text, userId, client, source);
+    }
+    // 特殊工作日簡短格式
+    else {
+      const specialDay = detectSpecialDayType(text);
+      if (specialDay) {
+        replyText = await processSpecialDayLog(text, userId, client, source, specialDay);
+      }
     }
   } catch (err) {
     console.error('handleEvent 發生錯誤：', err);

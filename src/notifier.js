@@ -1,11 +1,11 @@
 'use strict';
 const nodemailer = require('nodemailer');
+const { getTodayLogs, getAllMemberNames, getLeaveRecordsForDate, getTaiwanDateString } = require('./sheets');
 
 // ============================================================
 // LINE 推播通知
 // ============================================================
 
-// 推播訊息給主管（私訊，非群組回覆）
 async function notifyAdminLine(client, message) {
   const adminId = process.env.ADMIN_LINE_USER_ID;
   if (!adminId) {
@@ -29,7 +29,6 @@ async function notifyAdminLine(client, message) {
 // Email 警報（Gmail）
 // ============================================================
 
-// 發送電子郵件警報
 async function sendEmailAlert(subject, body) {
   if (!process.env.GMAIL_USER || !process.env.GMAIL_APP_PASSWORD || !process.env.NOTIFY_EMAIL) {
     console.warn('Email 設定不完整，略過寄信');
@@ -59,15 +58,13 @@ async function sendEmailAlert(subject, body) {
 }
 
 // ============================================================
-// 組合警報（同時推播 LINE 和寄送 Email）
+// 異常警報（即時，工作日誌送出後觸發）
 // ============================================================
 
-// 發送工作日誌異常警報給主管
 async function sendAnomalyAlert(client, { memberName, dayType, anomalies, date, status }) {
   const statusLabel = status === 'alert' ? '🚨 嚴重異常' : '⚠️ 警告';
   const anomalyLines = anomalies.map(a => `• ${a}`).join('\n');
 
-  // LINE 推播內容
   const lineMsg = [
     `${statusLabel}｜工作日誌通知`,
     `小編：${memberName}`,
@@ -78,7 +75,6 @@ async function sendAnomalyAlert(client, { memberName, dayType, anomalies, date, 
     anomalyLines,
   ].join('\n');
 
-  // Email 內容
   const emailBody = [
     `${statusLabel} 工作日誌異常通知`,
     ``,
@@ -98,4 +94,78 @@ async function sendAnomalyAlert(client, { memberName, dayType, anomalies, date, 
   ]);
 }
 
-module.exports = { notifyAdminLine, sendEmailAlert, sendAnomalyAlert };
+// ============================================================
+// 每日 22:30 彙整（格式依規格書第 8 節）
+// ============================================================
+
+async function sendDailySummary(client) {
+  const today = getTaiwanDateString();
+
+  const [logs, allMembers, leaveRecords] = await Promise.all([
+    getTodayLogs(),
+    getAllMemberNames(),
+    getLeaveRecordsForDate(today),
+  ]);
+
+  // 每人取最後一筆回報
+  const latestByName = new Map();
+  for (const row of logs) {
+    if (row[2]) latestByName.set(row[2], row);
+  }
+
+  // 今日請假名單（取姓名欄，欄位索引 2）
+  const leaveNames = new Set(leaveRecords.map(r => r[2]).filter(Boolean));
+
+  const normalList   = [];
+  const anomalyList  = []; // { name, reason }
+  const absentList   = []; // 未回報且未請假
+  const onLeaveList  = [];
+
+  for (const name of allMembers) {
+    if (leaveNames.has(name)) {
+      onLeaveList.push(name);
+      continue;
+    }
+    const row = latestByName.get(name);
+    if (!row) {
+      absentList.push(name);
+    } else if (row[7] === 'normal') {
+      normalList.push(name);
+    } else {
+      // warning 或 alert，附異常說明
+      const reason = row[8] ? row[8].split('；')[0] : (row[7] === 'alert' ? '嚴重異常' : '有警告');
+      anomalyList.push({ name, reason });
+    }
+  }
+
+  // 全員正常且無人缺席
+  if (anomalyList.length === 0 && absentList.length === 0) {
+    const dateStr = today.replace(/\//g, '/');
+    return notifyAdminLine(client, `✅ VLB ${dateStr} 全員回報正常，辛苦了！`);
+  }
+
+  // 有異常或缺報
+  const dateStr = today;
+  const lines = [`📊 VLB 今日工作回報 ${dateStr}`, ``];
+
+  if (normalList.length > 0) {
+    lines.push(`✅ 正常：${normalList.join('、')}`);
+  }
+  for (const { name, reason } of anomalyList) {
+    lines.push(`⚠️ 異常：${name}｜${reason}`);
+  }
+  for (const name of absentList) {
+    lines.push(`❗ 未回報且未請假：${name}（請確認狀況）`);
+  }
+  if (onLeaveList.length > 0) {
+    lines.push(`🏖️ 休假：${onLeaveList.join('、')}（已請假）`);
+  }
+
+  if (anomalyList.length > 0) {
+    lines.push(``, `請 ${anomalyList.map(a => a.name).join('、')} 補充說明。`);
+  }
+
+  return notifyAdminLine(client, lines.join('\n'));
+}
+
+module.exports = { notifyAdminLine, sendEmailAlert, sendAnomalyAlert, sendDailySummary };
