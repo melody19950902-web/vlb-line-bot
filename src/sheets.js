@@ -240,6 +240,29 @@ async function getLeaveRecordsForDate(dateStr) {
 }
 
 // ============================================================
+// 月度異常記錄
+// 欄位：月份 | 小編名稱 | 異常日期 | 異常類型
+// ============================================================
+
+async function saveMonthlyRecord({ month, name, date, anomalyType }) {
+  return appendRow('月度記錄', [month, name, date, anomalyType]);
+}
+
+// 取得指定月份的異常記錄（可依姓名過濾）
+async function getMonthlyAnomalies(month, name = null) {
+  const rows = await readRange('月度記錄!A:D');
+  if (!rows || rows.length < 2) return [];
+  return rows.slice(1).filter(r =>
+    r[0] === month && (name ? r[1] === name : true)
+  );
+}
+
+// 台灣時間當月字串，格式 YYYY/MM
+function getTaiwanMonthString(date = new Date()) {
+  return getTaiwanDateString(date).substring(0, 7);
+}
+
+// ============================================================
 // 日期工具函數
 // ============================================================
 
@@ -287,7 +310,10 @@ module.exports = {
   getWeeklyLogs,
   saveLeaveRecord,
   getLeaveRecordsForDate,
+  saveMonthlyRecord,
+  getMonthlyAnomalies,
   getTaiwanDateString,
   getTaiwanTimeString,
+  getTaiwanMonthString,
   DEFAULT_MEMBERS,
 };

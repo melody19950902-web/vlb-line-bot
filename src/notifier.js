@@ -1,6 +1,9 @@
 'use strict';
 const nodemailer = require('nodemailer');
-const { getTodayLogs, getAllMemberNames, getLeaveRecordsForDate, getTaiwanDateString } = require('./sheets');
+const {
+  getTodayLogs, getAllMemberNames, getLeaveRecordsForDate,
+  getTaiwanDateString, saveMonthlyRecord, getMonthlyAnomalies, getTaiwanMonthString,
+} = require('./sheets');
 
 // ============================================================
 // LINE 推播通知
@@ -95,11 +98,12 @@ async function sendAnomalyAlert(client, { memberName, dayType, anomalies, date, 
 }
 
 // ============================================================
-// 每日 22:30 彙整（格式依規格書第 8 節）
+// 每日 22:30 彙整（全 6 人逐人列出）
 // ============================================================
 
 async function sendDailySummary(client) {
   const today = getTaiwanDateString();
+  const month = getTaiwanMonthString();
 
   const [logs, allMembers, leaveRecords] = await Promise.all([
     getTodayLogs(),
@@ -113,72 +117,80 @@ async function sendDailySummary(client) {
     if (row[2]) latestByName.set(row[2], row);
   }
 
-  // 今日請假名單（取姓名欄，欄位索引 2）
-  const leaveNames = new Set(leaveRecords.map(r => r[2]).filter(Boolean));
-
-  const normalList   = [];
-  const anomalyList  = []; // { name, reason }
-  const absentList   = []; // 未回報且未請假
-  const onLeaveList  = []; // 昨天預告請假/補休（🏖️）
-  const sickList     = []; // 今日病假（🏥）
-  const personalList = []; // 今日事假（📋）
-
-  // 建立請假類型對照表 { name → leaveType }
+  // 請假類型對照表 { name → leaveType }
   const leaveTypeMap = new Map();
   for (const r of leaveRecords) {
     if (r[2]) leaveTypeMap.set(r[2], r[4] || '請假');
   }
 
+  const lines = [`📊 VLB 今日工作回報 ${today}`, ``];
+
+  const needsFollowUp = []; // 需要補充說明的人
+  const monthlyToRecord = []; // 需要寫入月度記錄的 { name, anomalyType }
+
   for (const name of allMembers) {
     const leaveType = leaveTypeMap.get(name);
-    if (leaveType === '病假') { sickList.push(name); continue; }
-    if (leaveType === '事假') { personalList.push(name); continue; }
-    if (leaveType) { onLeaveList.push(name); continue; } // 請假/補休
+
+    if (leaveType === '病假') {
+      lines.push(`🏥 ${name}｜病假`);
+      continue;
+    }
+    if (leaveType === '事假') {
+      lines.push(`📋 ${name}｜事假`);
+      continue;
+    }
+    if (leaveType) {
+      lines.push(`🏖️ ${name}｜休假（已請假）`);
+      continue;
+    }
 
     const row = latestByName.get(name);
     if (!row) {
-      absentList.push(name);
+      lines.push(`❗ ${name}｜未回報且未請假`);
+      monthlyToRecord.push({ name, anomalyType: '未回報' });
+      needsFollowUp.push(name);
     } else if (row[7] === 'normal') {
-      normalList.push(name);
+      lines.push(`✅ ${name}｜正常`);
     } else {
       const reason = row[8] ? row[8].split('；')[0] : (row[7] === 'alert' ? '嚴重異常' : '有警告');
-      anomalyList.push({ name, reason });
+      const emoji = row[7] === 'alert' ? '🚨' : '⚠️';
+      lines.push(`${emoji} ${name}｜${reason}`);
+      monthlyToRecord.push({ name, anomalyType: reason });
+      needsFollowUp.push(name);
     }
   }
 
-  // 全員正常且無人缺席
-  const allClear = anomalyList.length === 0 && absentList.length === 0;
-  if (allClear) {
-    return notifyAdminLine(client, `✅ VLB ${today} 全員回報正常，辛苦了！`);
+  lines.push(``);
+  const allNormal = needsFollowUp.length === 0;
+  lines.push(allNormal
+    ? `${allMembers.length} 人全員正常，辛苦了！`
+    : `${allMembers.length} 人狀態已確認。`
+  );
+
+  if (needsFollowUp.length > 0) {
+    lines.push(`請 ${needsFollowUp.join('、')} 補充說明。`);
   }
 
-  // 有異常或缺報
-  const lines = [`📊 VLB 今日工作回報 ${today}`, ``];
+  await notifyAdminLine(client, lines.join('\n'));
 
-  if (normalList.length > 0) {
-    lines.push(`✅ 正常：${normalList.join('、')}`);
-  }
-  for (const { name, reason } of anomalyList) {
-    lines.push(`⚠️ 異常：${name}｜${reason}`);
-  }
-  for (const name of absentList) {
-    lines.push(`❗ 未回報且未請假：${name}（請確認狀況）`);
-  }
-  if (onLeaveList.length > 0) {
-    lines.push(`🏖️ 休假：${onLeaveList.join('、')}（已請假）`);
-  }
-  for (const name of sickList) {
-    lines.push(`🏥 病假：${name}（當日回報）`);
-  }
-  for (const name of personalList) {
-    lines.push(`📋 事假：${name}（當日回報）`);
-  }
+  // 月度異常記錄與達標通報
+  for (const { name, anomalyType } of monthlyToRecord) {
+    await saveMonthlyRecord({ month, name, date: today, anomalyType });
 
-  if (anomalyList.length > 0) {
-    lines.push(``, `請 ${anomalyList.map(a => a.name).join('、')} 補充說明。`);
+    const records = await getMonthlyAnomalies(month, name);
+    const count = records.length;
+    if (count >= 4) {
+      const alertMsg = [
+        `🚨 月度異常通報`,
+        `小編：${name}`,
+        `本月（${month}）累計異常：${count} 次`,
+        `最新異常：${anomalyType}（${today}）`,
+        ``,
+        `請盡快與 ${name} 確認狀況。`,
+      ].join('\n');
+      await notifyAdminLine(client, alertMsg);
+    }
   }
-
-  return notifyAdminLine(client, lines.join('\n'));
 }
 
 module.exports = { notifyAdminLine, sendEmailAlert, sendAnomalyAlert, sendDailySummary };
