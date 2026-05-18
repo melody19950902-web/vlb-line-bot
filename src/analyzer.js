@@ -147,11 +147,11 @@ function parseWorkLog(text) {
   // --- 修正一：發布工時（非時間段行）---
   const publishMinutes = parsePublishMinutes(timeLogRaw);
 
-  // --- 有效總工時（扣午休 + 加上發布工時）---
+  // --- 有效總工時（任務時段直接加總 + 發布工時）---
   const effectiveTotalMinutes = timeEntries.reduce((sum, e) => sum + e.effectiveMins, 0) + publishMinutes;
   const effectiveTotalHours   = Math.round(effectiveTotalMinutes / 6) / 10;
 
-  // --- 原始總工時（含午休，供參考）---
+  // --- 原始總工時（任務時段加總，不含發布工時）---
   const totalMinutes = timeEntries.reduce((sum, e) => sum + e.duration, 0);
   const totalHours   = Math.round(totalMinutes / 6) / 10;
 
@@ -295,7 +295,7 @@ async function analyzeWorkLog(parsedLog, memberName) {
       return `  ${e.startTime}–${e.endTime}（有效 ${e.effectiveMins} 分鐘）：${e.task}${batchNote}`;
     }),
     ``,
-    `空白時段（非午休）：`,
+    `空白時段：`,
     parsedLog.gaps.length === 0
       ? '  無'
       : parsedLog.gaps.map(g => `  ${g.from}–${g.to}（${g.minutes} 分鐘）`).join('\n'),
@@ -344,7 +344,7 @@ async function localFallbackAnalysis(parsedLog) {
   ]);
 
   const minHours  = parseFloat(sopSettings['最低工時_小時'] || '6');
-  const maxGapMin = parseInt(sopSettings['空白時段上限_分'] || '60');
+  const maxGapMin = parseInt(sopSettings['空白時段上限_分'] || '120');
 
   // 步驟一：影片數量
   const dayRule   = dayTypeRules.find(r => r.工作類型 === parsedLog.dayType);
