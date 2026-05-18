@@ -178,9 +178,11 @@ async function handleEvent(event, client) {
   let replyText;
 
   try {
-    // 群組 ID 查詢（任何人皆可用）
-    if (text === '群組ID' && source.type === 'group') {
-      replyText = `此群組的 ID：\n${source.groupId}`;
+    // 群組 ID 查詢
+    if (text === '群組ID') {
+      replyText = source.type === 'group'
+        ? `此群組的 ID：\n${source.groupId}`
+        : '請在群組中輸入「群組ID」才能取得群組 ID。';
     }
     // 優先判斷系統指令
     else {
