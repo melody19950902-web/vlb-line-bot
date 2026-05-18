@@ -31,6 +31,25 @@ async function notifyAdminLine(client, message) {
   }
 }
 
+async function notifyGroup(client, message) {
+  const groupId = process.env.LINE_GROUP_ID;
+  if (!groupId) {
+    console.warn('未設定 LINE_GROUP_ID，略過群組推播');
+    return false;
+  }
+  try {
+    await client.pushMessage({
+      to:       groupId,
+      messages: [{ type: 'text', text: message }],
+    });
+    console.log('✅ 群組 LINE 推播已發送');
+    return true;
+  } catch (err) {
+    console.error('群組推播失敗：', err.message);
+    return false;
+  }
+}
+
 // ============================================================
 // Email 警報（Gmail）
 // ============================================================
@@ -241,12 +260,18 @@ async function sendDailySummary(client) {
     lines.push(`請 ${needsFollowUp.join('、')} 補充說明。`);
   }
 
-  // 工時提醒：不顯示於群組彙整，私下附在訊息底部供主管確認
+  const groupMessage = lines.join('\n');
+
+  // 工時提醒僅主管可見
+  const adminLines = [...lines];
   if (hoursWarnings.length > 0) {
-    lines.push(``, `─────`, `工時提醒（請私下確認）：${hoursWarnings.join('、')}`);
+    adminLines.push(``, `─────`, `工時提醒（請私下確認）：${hoursWarnings.join('、')}`);
   }
 
-  await notifyAdminLine(client, lines.join('\n'));
+  await Promise.all([
+    notifyAdminLine(client, adminLines.join('\n')),
+    notifyGroup(client, groupMessage),
+  ]);
 
   // 月度異常記錄與達標通報
   for (const { name, anomalyType } of monthlyToRecord) {
@@ -268,4 +293,4 @@ async function sendDailySummary(client) {
   }
 }
 
-module.exports = { notifyAdminLine, sendEmailAlert, sendAnomalyAlert, sendDailySummary };
+module.exports = { notifyAdminLine, notifyGroup, sendEmailAlert, sendAnomalyAlert, sendDailySummary };
