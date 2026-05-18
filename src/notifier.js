@@ -195,7 +195,6 @@ async function sendDailySummary(client) {
 
   const needsFollowUp = []; // 需要補充說明的人
   const monthlyToRecord = []; // 需要寫入月度記錄的 { name, anomalyType }
-  const hoursWarnings = []; // 工時不足，不顯示於群組彙整，私下通知主管
 
   for (const name of allMembers) {
     const leaveType = leaveTypeMap.get(name);
@@ -226,26 +225,14 @@ async function sendDailySummary(client) {
       const isSpecialDay = /外拍半天|外拍一天|課程拍攝|直播\s*\d|活動外拍/.test(row[4] || '');
       lines.push(isSpecialDay ? `✅ ${name}｜${row[4]}` : `✅ ${name}｜達成工作標準`);
     } else {
-      // 拆開異常：工時不足不顯示於群組，其餘正常顯示
       const allAnomalies = (row[8] || '').split('；').filter(Boolean);
-      const groupAnomalies = allAnomalies.filter(a => a !== '工時未達標準');
-
-      if (allAnomalies.includes('工時未達標準')) {
-        hoursWarnings.push(name);
-        monthlyToRecord.push({ name, anomalyType: '工時未達標準' });
+      const reason = allAnomalies[0];
+      const emoji = row[7] === 'alert' ? '🚨' : '⚠️';
+      lines.push(`${emoji} ${name}｜${reason}`);
+      for (const anomalyType of allAnomalies) {
+        monthlyToRecord.push({ name, anomalyType });
       }
-
-      if (groupAnomalies.length > 0) {
-        const reason = groupAnomalies[0];
-        const emoji = row[7] === 'alert' ? '🚨' : '⚠️';
-        lines.push(`${emoji} ${name}｜${reason}`);
-        monthlyToRecord.push({ name, anomalyType: reason });
-        needsFollowUp.push(name);
-      } else {
-        // 只有工時異常 → 群組顯示達成標準，主管私下另行告知
-        const isSpecialDay = /外拍半天|外拍一天|課程拍攝|直播\s*\d|活動外拍/.test(row[4] || '');
-        lines.push(isSpecialDay ? `✅ ${name}｜${row[4]}` : `✅ ${name}｜達成工作標準`);
-      }
+      needsFollowUp.push(name);
     }
   }
 
@@ -260,17 +247,11 @@ async function sendDailySummary(client) {
     lines.push(`請 ${needsFollowUp.join('、')} 補充說明。`);
   }
 
-  const groupMessage = lines.join('\n');
-
-  // 工時提醒僅主管可見
-  const adminLines = [...lines];
-  if (hoursWarnings.length > 0) {
-    adminLines.push(``, `─────`, `工時提醒（請私下確認）：${hoursWarnings.join('、')}`);
-  }
+  const message = lines.join('\n');
 
   await Promise.all([
-    notifyAdminLine(client, adminLines.join('\n')),
-    notifyGroup(client, groupMessage),
+    notifyAdminLine(client, message),
+    notifyGroup(client, message),
   ]);
 
   // 月度異常記錄與達標通報
