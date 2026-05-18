@@ -134,8 +134,11 @@ function parseWorkLog(text) {
     const endMin   = timeToMinutes(endTime);
     // 修正四：每個時間段自動扣除與午休的重疊
     const effectiveMins = rawDuration - lunchOverlapMinutes(startMin, endMin);
-    // 修正五：批量剪輯支數
-    const batchCount = parseBatchCount(task);
+    // 修正五：批量剪輯支數（先從任務名稱抓，若無則對剪輯任務用總影片數）
+    let batchCount = parseBatchCount(task);
+    if (!batchCount && /剪[片輯了編]|短影音剪/.test(task) && videoCount > 0) {
+      batchCount = videoCount;
+    }
 
     timeEntries.push({ startTime, endTime, task, duration: rawDuration, effectiveMins, batchCount });
   }
@@ -243,12 +246,12 @@ async function buildSystemPrompt() {
 
 【判斷順序（產出優先，修正二）】
 步驟一：影片數量是否達標（依各工作類型最低影片數）
-        批量剪輯時，per_video_mins ≤ 120 分鐘 → 剪輯速度正常
+        批量剪輯時，per_video_mins ≤ 120 分鐘才算達標；超過則必須標記，即使其他項目正常
 步驟二：是否有輪播、發布、限動等其他任務的記錄
 步驟三：有效總工時是否達到 ${minHours} 小時
 
-三項皆達標 → status 設為 "normal"，anomalies 陣列留空，不標記任何異常
-有任何一項未達標 → 才進行個別任務時間詳細檢查
+三項皆達標（批量剪輯時 per_video_mins 亦需 ≤ 120）→ status 設為 "normal"，anomalies 陣列留空，不標記任何異常
+有任何一項未達標，或批量剪輯 per_video_mins > 120 → 才進行個別任務時間詳細檢查
 
 【各工作類型最低影片數】
 ${dayTypeText}
@@ -355,11 +358,22 @@ async function localFallbackAnalysis(parsedLog) {
   const minVideos = dayRule ? dayRule.最低影片數 : 3;
   const videoOk   = parsedLog.videoCount >= minVideos;
 
+  // 批量剪輯每支平均時間（此項必須獨立檢查，不受早期回傳邏輯跳過）
+  const batchAnomalies = [];
+  for (const entry of parsedLog.timeEntries) {
+    if (entry.batchCount && entry.batchCount > 0) {
+      const perVideoMins = Math.round(entry.effectiveMins / entry.batchCount);
+      if (perVideoMins > 120) {
+        batchAnomalies.push(overtimeDescription(entry.task, perVideoMins, 120));
+      }
+    }
+  }
+
   // 步驟三：有效總工時（修正四）
   const hoursOk = parsedLog.effectiveTotalHours >= minHours;
 
-  // 修正二：三步皆達標 → 直接回傳正常，不做個別檢查
-  if (videoOk && hoursOk) {
+  // 修正二：三步皆達標（含批量剪輯速度）→ 直接回傳正常，不做個別檢查
+  if (videoOk && hoursOk && batchAnomalies.length === 0) {
     return {
       status:         'normal',
       video_count_ok: true,
@@ -370,8 +384,8 @@ async function localFallbackAnalysis(parsedLog) {
     };
   }
 
-  // 有任何未達標 → 進入詳細檢查
-  const anomalies = [];
+  // 有任何未達標 → 進入詳細檢查（批量異常已在上方收集，直接帶入）
+  const anomalies = [...batchAnomalies];
 
   if (!videoOk) {
     anomalies.push(`影片數量 ${parsedLog.videoCount} 支，低於 ${parsedLog.dayType} 標準（${minVideos} 支）`);
@@ -381,14 +395,7 @@ async function localFallbackAnalysis(parsedLog) {
   }
 
   for (const entry of parsedLog.timeEntries) {
-    // 修正五：批量剪輯用每支平均時間判斷
-    if (entry.batchCount && entry.batchCount > 0) {
-      const perVideoMins = Math.round(entry.effectiveMins / entry.batchCount);
-      if (perVideoMins > 120) {
-        anomalies.push(overtimeDescription(entry.task, perVideoMins, 120));
-      }
-      continue;
-    }
+    if (entry.batchCount && entry.batchCount > 0) continue; // 已在 batchAnomalies 處理
 
     const rule = taskTimeRules.find(r => entry.task.includes(r.任務關鍵字));
     if (!rule) continue;
