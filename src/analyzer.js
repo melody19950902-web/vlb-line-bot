@@ -27,11 +27,6 @@ function durationMinutes(start, end) {
   return timeToMinutes(end) - timeToMinutes(start);
 }
 
-// 計算與午休 12:00–13:00 的重疊分鐘數（修正四）
-function lunchOverlapMinutes(startMin, endMin) {
-  return Math.max(0, Math.min(endMin, 780) - Math.max(startMin, 720));
-}
-
 // ============================================================
 // 限動數量偵測
 // ============================================================
@@ -130,10 +125,8 @@ function parseWorkLog(text) {
     const rawDuration = durationMinutes(startTime, endTime);
     if (rawDuration <= 0) continue;
 
-    const startMin = timeToMinutes(startTime);
-    const endMin   = timeToMinutes(endTime);
-    // 修正四：每個時間段自動扣除與午休的重疊
-    const effectiveMins = rawDuration - lunchOverlapMinutes(startMin, endMin);
+    // 直接以任務時段長度計算，不扣除任何固定午休
+    const effectiveMins = rawDuration;
     // 修正五：批量剪輯支數（先從任務名稱抓，若無則對剪輯任務用總影片數）
     let batchCount = parseBatchCount(task);
     if (!batchCount && /剪[片輯了編]|短影音剪/.test(task) && videoCount > 0) {
@@ -162,17 +155,14 @@ function parseWorkLog(text) {
   const totalMinutes = timeEntries.reduce((sum, e) => sum + e.duration, 0);
   const totalHours   = Math.round(totalMinutes / 6) / 10;
 
-  // --- 空白時段（排除午休 12:00–13:00）---
+  // --- 空白時段（所有空白皆記錄，超過 120 分鐘才標記異常）---
   const gaps = [];
   for (let i = 1; i < timeEntries.length; i++) {
     const prevEndMin   = timeToMinutes(timeEntries[i - 1].endTime);
     const currStartMin = timeToMinutes(timeEntries[i].startTime);
     const gapMin = currStartMin - prevEndMin;
     if (gapMin <= 0) continue;
-    const isLunchBreak = prevEndMin >= 720 && currStartMin <= 780;
-    if (!isLunchBreak) {
-      gaps.push({ from: timeEntries[i - 1].endTime, to: timeEntries[i].startTime, minutes: gapMin });
-    }
+    gaps.push({ from: timeEntries[i - 1].endTime, to: timeEntries[i].startTime, minutes: gapMin });
   }
 
   // --- 限動數量 ---
@@ -222,7 +212,7 @@ async function buildSystemPrompt() {
   ]);
 
   const minHours = sopSettings['最低工時_小時'] || '6';
-  const maxGap   = sopSettings['空白時段上限_分'] || '60';
+  const maxGap   = sopSettings['空白時段上限_分'] || '120';
 
   const dayTypeText = dayTypeRules
     .map(r => `- ${r.工作類型}：最低 ${r.最低影片數} 支影片`)
@@ -241,10 +231,10 @@ async function buildSystemPrompt() {
 請依照以下規則判斷，只回傳 JSON，不要有任何其他文字或 markdown。
 
 【前置處理說明（已由系統計算完畢）】
-- effective_total_hours = 各時間段工時扣除 12:00–13:00 午休重疊 + 發布工時（每平台 9 分鐘）
-- 批量剪輯時，per_video_mins = 該時間段有效工時 ÷ 支數（已在明細中提供）
+- effective_total_hours = 所有有任務記錄的時段直接加總（不扣除任何固定午休）+ 發布工時（每平台 9 分鐘）
+- 批量剪輯時，per_video_mins = 該時間段工時 ÷ 支數（已在明細中提供）
 
-【判斷順序（產出優先，修正二）】
+【判斷順序（產出優先）】
 步驟一：影片數量是否達標（依各工作類型最低影片數）
         批量剪輯時，per_video_mins ≤ 120 分鐘才算達標；超過則必須標記，即使其他項目正常
 步驟二：是否有輪播、發布、限動等其他任務的記錄
@@ -261,14 +251,17 @@ ${dayTypeText}
 【各任務合理時間範圍】
 ${taskTimeText}
 
-【空白時段】
-- 連續空白超過 ${maxGap} 分鐘（非午休）才標記異常
+【空白時段規則】
+- 所有空白時段均視為可能的午休或彈性緩衝，不標記異常
+- 只有當空白時段超過 ${maxGap} 分鐘時，才標記為異常
 
 【異常描述格式（重要）】
 任務超時時，不顯示具體分鐘數，依程度描述：
 - 超過上限 110–130%：「[任務名稱] 耗時稍長」
 - 超過上限 130% 以上：「[任務名稱] 耗時明顯較長，建議確認」
-影片數量不足、工時不足、空白時段的描述維持原格式，不受此限。
+工時未達 ${minHours} 小時時：輸出「工時未達標準」，不顯示具體小時數
+空白時段超過上限時：輸出「有較長空白時段，建議確認」，不顯示具體分鐘數
+影片數量不足的描述維持原格式。
 
 【回傳格式（嚴格 JSON，不含 markdown）】
 {
@@ -369,7 +362,7 @@ async function localFallbackAnalysis(parsedLog) {
     }
   }
 
-  // 步驟三：有效總工時（修正四）
+  // 步驟三：有效總工時
   const hoursOk = parsedLog.effectiveTotalHours >= minHours;
 
   // 修正二：三步皆達標（含批量剪輯速度）→ 直接回傳正常，不做個別檢查
@@ -391,7 +384,7 @@ async function localFallbackAnalysis(parsedLog) {
     anomalies.push(`影片數量 ${parsedLog.videoCount} 支，低於 ${parsedLog.dayType} 標準（${minVideos} 支）`);
   }
   if (!hoursOk) {
-    anomalies.push(`有效總工時 ${parsedLog.effectiveTotalHours} 小時，低於標準 ${minHours} 小時`);
+    anomalies.push('工時未達標準');
   }
 
   for (const entry of parsedLog.timeEntries) {
@@ -407,7 +400,8 @@ async function localFallbackAnalysis(parsedLog) {
 
   for (const gap of parsedLog.gaps) {
     if (gap.minutes > maxGapMin) {
-      anomalies.push(`${gap.from}–${gap.to} 有 ${gap.minutes} 分鐘空白，超過上限（${maxGapMin} 分鐘）`);
+      anomalies.push('有較長空白時段，建議確認');
+      break; // 同一天只標記一次
     }
   }
 

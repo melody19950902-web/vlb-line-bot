@@ -176,6 +176,7 @@ async function sendDailySummary(client) {
 
   const needsFollowUp = []; // 需要補充說明的人
   const monthlyToRecord = []; // 需要寫入月度記錄的 { name, anomalyType }
+  const hoursWarnings = []; // 工時不足，不顯示於群組彙整，私下通知主管
 
   for (const name of allMembers) {
     const leaveType = leaveTypeMap.get(name);
@@ -198,26 +199,51 @@ async function sendDailySummary(client) {
       lines.push(`❗ ${name}｜未回報且未請假`);
       monthlyToRecord.push({ name, anomalyType: '未回報' });
       needsFollowUp.push(name);
-    } else if (row[7] === 'normal') {
-      lines.push(`✅ ${name}｜正常`);
-    } else {
-      const reason = row[8] ? row[8].split('；')[0] : (row[7] === 'alert' ? '嚴重異常' : '有警告');
-      const emoji = row[7] === 'alert' ? '🚨' : '⚠️';
-      lines.push(`${emoji} ${name}｜${reason}`);
-      monthlyToRecord.push({ name, anomalyType: reason });
+    } else if (row[7] === 'pending') {
+      // 22:30 分析失敗的兜底
+      lines.push(`❓ ${name}｜分析待確認`);
       needsFollowUp.push(name);
+    } else if (row[7] === 'normal') {
+      const isSpecialDay = /外拍半天|外拍一天|課程拍攝|直播\s*\d|活動外拍/.test(row[4] || '');
+      lines.push(isSpecialDay ? `✅ ${name}｜${row[4]}` : `✅ ${name}｜達成工作標準`);
+    } else {
+      // 拆開異常：工時不足不顯示於群組，其餘正常顯示
+      const allAnomalies = (row[8] || '').split('；').filter(Boolean);
+      const groupAnomalies = allAnomalies.filter(a => a !== '工時未達標準');
+
+      if (allAnomalies.includes('工時未達標準')) {
+        hoursWarnings.push(name);
+        monthlyToRecord.push({ name, anomalyType: '工時未達標準' });
+      }
+
+      if (groupAnomalies.length > 0) {
+        const reason = groupAnomalies[0];
+        const emoji = row[7] === 'alert' ? '🚨' : '⚠️';
+        lines.push(`${emoji} ${name}｜${reason}`);
+        monthlyToRecord.push({ name, anomalyType: reason });
+        needsFollowUp.push(name);
+      } else {
+        // 只有工時異常 → 群組顯示達成標準，主管私下另行告知
+        const isSpecialDay = /外拍半天|外拍一天|課程拍攝|直播\s*\d|活動外拍/.test(row[4] || '');
+        lines.push(isSpecialDay ? `✅ ${name}｜${row[4]}` : `✅ ${name}｜達成工作標準`);
+      }
     }
   }
 
   lines.push(``);
   const allNormal = needsFollowUp.length === 0;
   lines.push(allNormal
-    ? `${allMembers.length} 人全員正常，辛苦了！`
+    ? `${allMembers.length} 人全員達成工作標準，辛苦了！`
     : `${allMembers.length} 人狀態已確認。`
   );
 
   if (needsFollowUp.length > 0) {
     lines.push(`請 ${needsFollowUp.join('、')} 補充說明。`);
+  }
+
+  // 工時提醒：不顯示於群組彙整，私下附在訊息底部供主管確認
+  if (hoursWarnings.length > 0) {
+    lines.push(``, `─────`, `工時提醒（請私下確認）：${hoursWarnings.join('、')}`);
   }
 
   await notifyAdminLine(client, lines.join('\n'));

@@ -18,7 +18,7 @@ const cache = {
 
 const DEFAULT_SOP_SETTINGS = {
   '最低工時_小時':   '6',
-  '空白時段上限_分': '60',
+  '空白時段上限_分': '120',
 };
 
 const DEFAULT_TASK_TIME_RULES = [
