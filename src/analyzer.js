@@ -261,6 +261,12 @@ ${taskTimeText}
 【空白時段】
 - 連續空白超過 ${maxGap} 分鐘（非午休）才標記異常
 
+【異常描述格式（重要）】
+任務超時時，不顯示具體分鐘數，依程度描述：
+- 超過上限 110–130%：「[任務名稱] 耗時稍長」
+- 超過上限 130% 以上：「[任務名稱] 耗時明顯較長，建議確認」
+影片數量不足、工時不足、空白時段的描述維持原格式，不受此限。
+
 【回傳格式（嚴格 JSON，不含 markdown）】
 {
   "status": "normal 或 warning 或 alert",
@@ -321,6 +327,16 @@ async function analyzeWorkLog(parsedLog, memberName) {
 }
 
 // ============================================================
+// 超時描述輔助（不顯示分鐘數）
+// 110–130% → 耗時稍長；>130% → 耗時明顯較長
+// ============================================================
+function overtimeDescription(taskName, actualMins, limitMins) {
+  const ratio = actualMins / limitMins;
+  if (ratio >= 1.3) return `${taskName} 耗時明顯較長，建議確認`;
+  return `${taskName} 耗時稍長`;
+}
+
+// ============================================================
 // 本地備援分析
 // ============================================================
 
@@ -369,17 +385,16 @@ async function localFallbackAnalysis(parsedLog) {
     if (entry.batchCount && entry.batchCount > 0) {
       const perVideoMins = Math.round(entry.effectiveMins / entry.batchCount);
       if (perVideoMins > 120) {
-        anomalies.push(`批量剪輯「${entry.task}」每支平均 ${perVideoMins} 分鐘，超過上限（120 分鐘）`);
+        anomalies.push(overtimeDescription(entry.task, perVideoMins, 120));
       }
       continue;
     }
 
     const rule = taskTimeRules.find(r => entry.task.includes(r.任務關鍵字));
     if (!rule) continue;
-    // 修正三：輪播異常上限 150 分鐘
     const anomalyLimit = rule.任務關鍵字 === '輪播' ? 150 : rule.異常上限_分;
     if (entry.effectiveMins > anomalyLimit) {
-      anomalies.push(`「${entry.task}」記錄 ${entry.effectiveMins} 分鐘，超過異常上限（${anomalyLimit} 分鐘）`);
+      anomalies.push(overtimeDescription(entry.task, entry.effectiveMins, anomalyLimit));
     }
   }
 
@@ -389,7 +404,7 @@ async function localFallbackAnalysis(parsedLog) {
     }
   }
 
-  const timeOk = !anomalies.some(a => a.includes('空白') || a.includes('超過異常') || a.includes('工時'));
+  const timeOk = !anomalies.some(a => a.includes('空白') || a.includes('耗時') || a.includes('工時'));
   const status = !videoOk ? 'alert' : (anomalies.length > 0 ? 'warning' : 'normal');
 
   return {
