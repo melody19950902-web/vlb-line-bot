@@ -248,6 +248,18 @@ ${dayTypeText}
 - 大型活動日（限動組）：查核限動數量，活動日須有 3–5 則限時動態
 - 大型活動日（拍照修片組）：查核照片產出，基本要求：大合照 1 張、現場照+老師照合計 3–5 張
 
+【影片數量評估——含非剪輯任務時的放寬規則（重要）】
+若時間記錄中有大量非剪輯任務（溝通協調、設備架設、直播準備、外部聯繫、整理帳號、字幕排程等），
+這些任務佔用了原可用於剪輯的時間，影片數量標準應按以下方式評估：
+1. 計算「可用剪輯時間」= 總有效工時 - 非剪輯任務時間
+2. 若「可用剪輯時間 ÷ 影片數量 ≤ 120 分鐘/支」，則影片數量達標，不應標記
+非剪輯任務合計超過 120 分鐘時，務必套用此放寬邏輯再判斷，不可直接套用最低影片數標準。
+
+【發布任務判斷規則（重要）】
+- 實際發布（貼文上傳、限時動態發布）可透過獨立的「已發布｜平台｜帳號」訊息提交，不需在工作日誌時間記錄中重複列出
+- 若時間記錄已包含直播、剪輯、修照、限動製作、輪播製作等相關工作，即使沒有「發布」關鍵字，也不應標記「缺少發布記錄」
+- 只有當工作日誌完全沒有任何跟發布、限動、直播相關的任務時，才標記缺少
+
 【各任務合理時間範圍】
 ${taskTimeText}
 
@@ -272,6 +284,35 @@ ${taskTimeText}
   "anomalies": ["繁體中文異常說明1", "繁體中文異常說明2"],
   "summary": "一句話整體評估（繁體中文）"
 }`;
+}
+
+// ============================================================
+// 批量剪輯確定性覆蓋（無論 Claude 怎麼判斷，此結果優先）
+// per_video_mins > 120 → 確保異常被記錄
+// per_video_mins ≤ 120 → 移除 Claude 誤加的批量超時標記
+// ============================================================
+function applyDeterministicBatchCheck(result, parsedLog) {
+  let { anomalies = [], status } = result;
+  anomalies = [...anomalies];
+
+  for (const entry of parsedLog.timeEntries) {
+    if (!entry.batchCount || entry.batchCount <= 0) continue;
+    const perVideoMins = Math.round(entry.effectiveMins / entry.batchCount);
+
+    if (perVideoMins > 120) {
+      const desc = overtimeDescription(entry.task, perVideoMins, 120);
+      // 若 Claude 未標記此異常，強制加入
+      if (!anomalies.some(a => a.startsWith(entry.task) && a.includes('耗時'))) {
+        anomalies.push(desc);
+      }
+      if (status === 'normal') status = 'warning';
+    } else {
+      // 移除 Claude 對此任務誤判的超時標記
+      anomalies = anomalies.filter(a => !(a.startsWith(entry.task) && a.includes('耗時')));
+    }
+  }
+
+  return { ...result, anomalies, status };
 }
 
 // ============================================================
@@ -315,7 +356,7 @@ async function analyzeWorkLog(parsedLog, memberName) {
     const raw = message.content[0].text.trim();
     const jsonMatch = raw.match(/\{[\s\S]*\}/);
     if (!jsonMatch) throw new Error('Claude 未回傳有效 JSON');
-    return JSON.parse(jsonMatch[0]);
+    return applyDeterministicBatchCheck(JSON.parse(jsonMatch[0]), parsedLog);
   } catch (err) {
     console.error('Claude 分析失敗，改用本地備援分析：', err.message);
     return await localFallbackAnalysis(parsedLog);
