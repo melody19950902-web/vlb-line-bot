@@ -178,7 +178,12 @@ async function handleEvent(event, client) {
   let replyText;
 
   try {
+    // 群組 ID 查詢（任何人皆可用）
+    if (text === '群組ID' && source.type === 'group') {
+      replyText = `此群組的 ID：\n${source.groupId}`;
+    }
     // 優先判斷系統指令
+    else {
     const cmdReply = await handleCommand(text, userId);
     if (cmdReply) {
       replyText = cmdReply;
@@ -204,6 +209,7 @@ async function handleEvent(event, client) {
         replyText = await processSpecialDayLog(text, userId, client, source, specialDay);
       }
     }
+    } // end else (非群組ID指令)
   } catch (err) {
     console.error('handleEvent 發生錯誤：', err);
     replyText = '⚠️ 系統發生錯誤，請稍後再試。\n若問題持續，請聯絡管理員。';
