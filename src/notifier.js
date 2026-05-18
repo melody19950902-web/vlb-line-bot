@@ -5,6 +5,7 @@ const {
   getTaiwanDateString, getTaiwanTimeString,
   saveWorkLog, getTodayPublishReports,
   saveMonthlyRecord, getMonthlyAnomalies, getTaiwanMonthString,
+  getSopSettings,
 } = require('./sheets');
 const { parseWorkLog, analyzeWorkLog } = require('./analyzer');
 
@@ -127,12 +128,16 @@ async function sendDailySummary(client) {
   const today = getTaiwanDateString();
   const month = getTaiwanMonthString();
 
-  const [logs, allMembers, leaveRecords, publishReportMap] = await Promise.all([
+  const [logs, allMembers, leaveRecords, publishReportMap, sopSettings] = await Promise.all([
     getTodayLogs(),
     getAllMemberNames(),
     getLeaveRecordsForDate(today),
     getTodayPublishReports(),
+    getSopSettings(),
   ]);
+
+  const minHours = parseFloat(sopSettings['最低工時_小時'] || '6');
+  const hoursDetailMap = new Map(); // name → { actual: 實際時數 }
 
   // 每人取最後一筆回報
   const latestByName = new Map();
@@ -166,6 +171,10 @@ async function sendDailySummary(client) {
       const analysis = await analyzeWorkLog(parsedLog, name);
       const time = getTaiwanTimeString();
 
+      if (analysis.anomalies.includes('時數未達標準')) {
+        hoursDetailMap.set(name, { actual: parsedLog.effectiveTotalHours });
+      }
+
       await saveWorkLog({
         date: today, time, name, lineUserId: row[3],
         dayType: parsedLog.dayType, videoCount: parsedLog.videoCount,
@@ -191,44 +200,67 @@ async function sendDailySummary(client) {
     if (r[2]) leaveTypeMap.set(r[2], r[4] || '請假');
   }
 
-  const lines = [`📊 VLB 今日工作回報 ${today}`, ``];
+  const header = [`📊 VLB 今日工作回報 ${today}`, ``];
+  const groupLines = [...header];
+  const adminLines = [...header];
 
-  const needsFollowUp = []; // 需要補充說明的人
-  const monthlyToRecord = []; // 需要寫入月度記錄的 { name, anomalyType }
+  const needsFollowUp = [];
+  const monthlyToRecord = [];
 
   for (const name of allMembers) {
     const leaveType = leaveTypeMap.get(name);
 
     if (leaveType === '病假') {
-      lines.push(`🏥 ${name}｜病假`);
+      groupLines.push(`🏥 ${name}｜病假`);
+      adminLines.push(`🏥 ${name}｜病假`);
       continue;
     }
     if (leaveType === '事假') {
-      lines.push(`📋 ${name}｜事假`);
+      groupLines.push(`📋 ${name}｜事假`);
+      adminLines.push(`📋 ${name}｜事假`);
       continue;
     }
     if (leaveType) {
-      lines.push(`🏖️ ${name}｜休假（已請假）`);
+      groupLines.push(`🏖️ ${name}｜休假（已請假）`);
+      adminLines.push(`🏖️ ${name}｜休假（已請假）`);
       continue;
     }
 
     const row = latestByName.get(name);
     if (!row) {
-      lines.push(`❗ ${name}｜未回報且未請假`);
+      groupLines.push(`❗ ${name}｜未回報且未請假`);
+      adminLines.push(`❗ ${name}｜未回報且未請假`);
       monthlyToRecord.push({ name, anomalyType: '未回報' });
       needsFollowUp.push(name);
     } else if (row[7] === 'pending') {
-      // 22:30 分析失敗的兜底
-      lines.push(`❓ ${name}｜分析待確認`);
+      groupLines.push(`❓ ${name}｜分析待確認`);
+      adminLines.push(`❓ ${name}｜分析待確認`);
       needsFollowUp.push(name);
     } else if (row[7] === 'normal') {
       const isSpecialDay = /外拍半天|外拍一天|課程拍攝|直播\s*\d|活動外拍/.test(row[4] || '');
-      lines.push(isSpecialDay ? `✅ ${name}｜${row[4]}` : `✅ ${name}｜達成工作標準`);
+      const line = isSpecialDay ? `✅ ${name}｜${row[4]}` : `✅ ${name}｜達成工作標準`;
+      groupLines.push(line);
+      adminLines.push(line);
     } else {
       const allAnomalies = (row[8] || '').split('；').filter(Boolean);
       const reason = allAnomalies[0];
       const emoji = row[7] === 'alert' ? '🚨' : '⚠️';
-      lines.push(`${emoji} ${name}｜${reason}`);
+      groupLines.push(`${emoji} ${name}｜${reason}`);
+
+      // 主管版：若有時數異常，附上實際時數與不足量
+      const hoursDetail = hoursDetailMap.get(name);
+      let adminReason = reason;
+      if (hoursDetail) {
+        const shortfall = Math.round((minHours - hoursDetail.actual) * 10) / 10;
+        const hoursNote = `時數未達標準（實際 ${hoursDetail.actual} 小時，不足 ${shortfall} 小時）`;
+        if (reason === '時數未達標準') {
+          adminReason = hoursNote;
+        } else {
+          adminReason = `${reason}（另：${hoursNote}）`;
+        }
+      }
+      adminLines.push(`${emoji} ${name}｜${adminReason}`);
+
       for (const anomalyType of allAnomalies) {
         monthlyToRecord.push({ name, anomalyType });
       }
@@ -236,22 +268,20 @@ async function sendDailySummary(client) {
     }
   }
 
-  lines.push(``);
   const allNormal = needsFollowUp.length === 0;
-  lines.push(allNormal
-    ? `${allMembers.length} 人全員達成工作標準，辛苦了！`
-    : `${allMembers.length} 人狀態已確認。`
-  );
-
-  if (needsFollowUp.length > 0) {
-    lines.push(`請 ${needsFollowUp.join('、')} 補充說明。`);
-  }
-
-  const message = lines.join('\n');
+  const footer = [
+    ``,
+    allNormal
+      ? `${allMembers.length} 人全員達成工作標準，辛苦了！`
+      : `${allMembers.length} 人狀態已確認。`,
+    ...(needsFollowUp.length > 0 ? [`請 ${needsFollowUp.join('、')} 補充說明。`] : []),
+  ];
+  groupLines.push(...footer);
+  adminLines.push(...footer);
 
   await Promise.all([
-    notifyAdminLine(client, message),
-    notifyGroup(client, message),
+    notifyAdminLine(client, adminLines.join('\n')),
+    notifyGroup(client, groupLines.join('\n')),
   ]);
 
   // 月度異常記錄與達標通報

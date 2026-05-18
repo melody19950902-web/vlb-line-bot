@@ -271,7 +271,7 @@ ${taskTimeText}
 任務超時時，不顯示具體分鐘數，依程度描述：
 - 超過上限 110–130%：「[任務名稱] 耗時稍長」
 - 超過上限 130% 以上：「[任務名稱] 耗時明顯較長，建議確認」
-工時未達 ${minHours} 小時時：輸出「工時未達標準」，不顯示具體小時數
+工時未達 ${minHours} 小時時：輸出「時數未達標準」，不顯示具體小時數
 空白時段超過上限時：輸出「有較長空白時段，建議確認」，不顯示具體分鐘數
 影片數量不足的描述維持原格式。
 
@@ -425,7 +425,7 @@ async function localFallbackAnalysis(parsedLog) {
     anomalies.push(`影片數量 ${parsedLog.videoCount} 支，低於 ${parsedLog.dayType} 標準（${minVideos} 支）`);
   }
   if (!hoursOk) {
-    anomalies.push('工時未達標準');
+    anomalies.push('時數未達標準');
   }
 
   for (const entry of parsedLog.timeEntries) {
