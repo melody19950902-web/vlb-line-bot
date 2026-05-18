@@ -2,8 +2,11 @@
 const nodemailer = require('nodemailer');
 const {
   getTodayLogs, getAllMemberNames, getLeaveRecordsForDate,
-  getTaiwanDateString, saveMonthlyRecord, getMonthlyAnomalies, getTaiwanMonthString,
+  getTaiwanDateString, getTaiwanTimeString,
+  saveWorkLog, getTodayPublishReports,
+  saveMonthlyRecord, getMonthlyAnomalies, getTaiwanMonthString,
 } = require('./sheets');
+const { parseWorkLog, analyzeWorkLog } = require('./analyzer');
 
 // ============================================================
 // LINE 推播通知
@@ -105,16 +108,62 @@ async function sendDailySummary(client) {
   const today = getTaiwanDateString();
   const month = getTaiwanMonthString();
 
-  const [logs, allMembers, leaveRecords] = await Promise.all([
+  const [logs, allMembers, leaveRecords, publishReportMap] = await Promise.all([
     getTodayLogs(),
     getAllMemberNames(),
     getLeaveRecordsForDate(today),
+    getTodayPublishReports(),
   ]);
 
   // 每人取最後一筆回報
   const latestByName = new Map();
   for (const row of logs) {
     if (row[2]) latestByName.set(row[2], row);
+  }
+
+  // 對 pending 的工作日誌執行最終分析（整合發布回報後才判斷）
+  for (const [name, row] of latestByName) {
+    if (row[7] !== 'pending') continue;
+    try {
+      const publishLines = publishReportMap.get(name) || [];
+      const mergedTimeLog = publishLines.length > 0
+        ? row[6] + '\n' + publishLines.join('\n')
+        : row[6];
+
+      const fullLogText = [
+        `今日類型：${row[4]}`,
+        `影片數量：${row[5]}`,
+        `時間記錄：`,
+        mergedTimeLog,
+        row[9] ? `備註：${row[9]}` : '',
+      ].filter(Boolean).join('\n');
+
+      const parsedLog = parseWorkLog(fullLogText);
+      if (parsedLog.error) {
+        console.error(`22:30 重新解析失敗 ${name}：${parsedLog.error}`);
+        continue;
+      }
+
+      const analysis = await analyzeWorkLog(parsedLog, name);
+      const time = getTaiwanTimeString();
+
+      await saveWorkLog({
+        date: today, time, name, lineUserId: row[3],
+        dayType: parsedLog.dayType, videoCount: parsedLog.videoCount,
+        timeLog: mergedTimeLog, status: analysis.status,
+        anomalies: analysis.anomalies, notes: parsedLog.notes || '',
+      });
+
+      // 更新 latestByName，讓下方彙整使用最終結果
+      latestByName.set(name, [
+        today, time, name, row[3],
+        parsedLog.dayType, String(parsedLog.videoCount),
+        mergedTimeLog, analysis.status,
+        analysis.anomalies.join('；'), parsedLog.notes || '',
+      ]);
+    } catch (err) {
+      console.error(`22:30 分析 ${name} 失敗：`, err.message);
+    }
   }
 
   // 請假類型對照表 { name → leaveType }

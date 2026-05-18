@@ -1,8 +1,7 @@
 'use strict';
-const { parseWorkLog, analyzeWorkLog, detectSpecialDayType } = require('./analyzer');
-const { saveWorkLog, saveLeaveRecord, getMemberName,
+const { parseWorkLog, detectSpecialDayType } = require('./analyzer');
+const { saveWorkLog, savePublishReport, saveLeaveRecord, getMemberName,
         getTaiwanDateString, getTaiwanTimeString }           = require('./sheets');
-const { sendAnomalyAlert }                                   = require('./notifier');
 const { handleCommand }                                      = require('./commands');
 
 // ============================================================
@@ -34,6 +33,11 @@ function isWorkLog(text) {
     && text.includes('今日類型')
     && text.includes('影片數量')
     && text.includes('時間記錄');
+}
+
+// 發布回報（單獨傳入的 "已發布｜平台｜帳號" 訊息）
+function isPublishReport(text) {
+  return text && /^已發布[｜|]/.test(text.trim());
 }
 
 // 請假 / 補休 / 當天臨時請假（靜默記錄，不回覆）
@@ -78,43 +82,7 @@ async function getMemberDisplayName(userId, client, source) {
 }
 
 // ============================================================
-// 回覆訊息格式化
-// ============================================================
-
-function buildNormalReply(memberName, analysis, parsedLog) {
-  return [
-    `✅ ${memberName} 的工作日誌已收到！`,
-    `📹 影片數量：${parsedLog.videoCount} 支 ✓`,
-    `⏱️ 時間記錄：合理 ✓`,
-    `📋 今日類型：${parsedLog.dayType}`,
-    `⏰ 總工時：${analysis.total_hours} 小時`,
-    ``,
-    `辛苦了，繼續加油！`,
-  ].join('\n');
-}
-
-function buildAnomalyReply(memberName, analysis, parsedLog) {
-  const lines = [`⚠️ ${memberName} 的工作日誌已收到`];
-  lines.push(analysis.video_count_ok
-    ? `📹 影片數量：${parsedLog.videoCount} 支 ✓`
-    : `📹 影片數量：${parsedLog.videoCount} 支（${parsedLog.dayType}標準未達）`
-  );
-  lines.push(analysis.time_log_ok
-    ? `⏱️ 時間記錄：合理 ✓`
-    : `⏱️ 時間記錄：發現異常`
-  );
-  lines.push(`📋 今日類型：${parsedLog.dayType}`);
-  lines.push(`⏰ 總工時：${analysis.total_hours} 小時`);
-  if (analysis.anomalies && analysis.anomalies.length > 0) {
-    lines.push(``, `異常說明：`);
-    analysis.anomalies.forEach(a => lines.push(`• ${a}`));
-  }
-  lines.push(``, `主管已收到通知。`);
-  return lines.join('\n');
-}
-
-// ============================================================
-// 工作日誌處理流程
+// 工作日誌處理流程（格式檢查後靜默儲存，22:30 統一查核）
 // ============================================================
 
 async function processWorkLog(text, userId, client, source) {
@@ -124,30 +92,17 @@ async function processWorkLog(text, userId, client, source) {
   }
 
   const memberName = await getMemberDisplayName(userId, client, source);
-  const analysis   = await analyzeWorkLog(parsedLog, memberName);
   const date       = getTaiwanDateString();
   const time       = getTaiwanTimeString();
 
   await saveWorkLog({
     date, time, name: memberName, lineUserId: userId,
     dayType: parsedLog.dayType, videoCount: parsedLog.videoCount,
-    timeLog: parsedLog.timeLogRaw, status: analysis.status,
-    anomalies: analysis.anomalies, notes: parsedLog.notes,
+    timeLog: parsedLog.timeLogRaw, status: 'pending',
+    anomalies: [], notes: parsedLog.notes,
   });
 
-  if (analysis.status !== 'normal') {
-    await sendAnomalyAlert(client, {
-      memberName,
-      dayType:   parsedLog.dayType,
-      anomalies: analysis.anomalies,
-      date,
-      status:    analysis.status,
-    });
-  }
-
-  return analysis.status === 'normal'
-    ? buildNormalReply(memberName, analysis, parsedLog)
-    : buildAnomalyReply(memberName, analysis, parsedLog);
+  return null; // 全天靜默收資料，22:30 統一查核
 }
 
 // ============================================================
@@ -165,7 +120,21 @@ async function processSpecialDayLog(text, userId, client, source, specialDay) {
     timeLog: text, status: 'normal', anomalies: [], notes: '',
   });
 
-  return `✅ ${memberName} 已登記：${specialDay.dayType}`;
+  return null; // 全天靜默收資料，22:30 統一查核
+}
+
+// ============================================================
+// 發布回報處理（靜默儲存至發布記錄）
+// ============================================================
+
+async function processPublishReport(text, userId, client, source) {
+  const memberName = await getMemberDisplayName(userId, client, source);
+  const date       = getTaiwanDateString();
+  const time       = getTaiwanTimeString();
+
+  await savePublishReport({ date, time, name: memberName, lineUserId: userId, rawText: text });
+  console.log(`📢 發布回報記錄：${memberName} ${text}`);
+  return null; // 靜默接收
 }
 
 // ============================================================
@@ -217,6 +186,11 @@ async function handleEvent(event, client) {
     // 請假 / 補休（靜默記錄，不回覆）
     else if (parseLeaveRequest(text)) {
       await processLeaveRequest(text, userId, client, source, parseLeaveRequest(text));
+      return; // 不回覆
+    }
+    // 發布回報（靜默記錄，不回覆）
+    else if (isPublishReport(text)) {
+      await processPublishReport(text, userId, client, source);
       return; // 不回覆
     }
     // 完整工作日誌

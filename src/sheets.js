@@ -232,6 +232,30 @@ async function saveLeaveRecord({ leaveDate, submitTime, name, lineUserId, leaveT
   ]);
 }
 
+// ============================================================
+// 發布回報讀寫（來自單獨傳入的「已發布｜平台｜帳號」訊息）
+// 欄位：日期 | 時間 | 姓名 | LINE_User_ID | 原始文字
+// ============================================================
+
+async function savePublishReport({ date, time, name, lineUserId, rawText }) {
+  return appendRow('發布記錄', [date, time, name, lineUserId, rawText]);
+}
+
+// 回傳今日發布回報，Map<姓名, string[]>
+async function getTodayPublishReports() {
+  const rows = await readRange('發布記錄!A:E');
+  if (!rows || rows.length < 2) return new Map();
+  const today = getTaiwanDateString();
+  const byName = new Map();
+  for (const row of rows.slice(1)) {
+    if (row[0] !== today || !row[2]) continue;
+    const name = row[2];
+    if (!byName.has(name)) byName.set(name, []);
+    byName.get(name).push(row[4] || '');
+  }
+  return byName;
+}
+
 // 取得指定日期的請假名單
 async function getLeaveRecordsForDate(dateStr) {
   const rows = await readRange('請假記錄!A:F');
@@ -310,6 +334,8 @@ module.exports = {
   getWeeklyLogs,
   saveLeaveRecord,
   getLeaveRecordsForDate,
+  savePublishReport,
+  getTodayPublishReports,
   saveMonthlyRecord,
   getMonthlyAnomalies,
   getTaiwanDateString,
