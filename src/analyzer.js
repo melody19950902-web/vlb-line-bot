@@ -11,7 +11,17 @@ const VALID_DAY_TYPES = [
   '大型活動日（短影音組）',
   '大型活動日（限動組）',
   '大型活動日（拍照修片組）',
+  '課程日（拍攝組）',
+  '課程日（拍照組）',
+  '課程日（限動組）',
+  '課程日（行政支援）',
 ];
+
+// 課程日類型（影片數量 0 支為正常）
+const COURSE_DAY_TYPES = new Set([
+  '課程日（拍攝組）', '課程日（拍照組）',
+  '課程日（限動組）', '課程日（行政支援）',
+]);
 
 // ============================================================
 // 時間工具
@@ -19,7 +29,11 @@ const VALID_DAY_TYPES = [
 
 function timeToMinutes(str) {
   const normalized = str.replace('：', ':');
-  const [h, m] = normalized.split(':').map(Number);
+  const parts = normalized.split(':');
+  let h = parseInt(parts[0]);
+  const m = parseInt(parts[1]);
+  // 單位數小時（無補零）在工作日誌中視為下午時段：1→13, 2→14 ... 9→21
+  if (parts[0].length === 1 && h >= 1 && h <= 9) h += 12;
   return h * 60 + m;
 }
 
@@ -46,6 +60,23 @@ function extractLimitedStoryCount(entries) {
 function parseBatchCount(task) {
   const m = task.match(/(?:剪[片輯了編]|短影音剪)\s*(\d+)\s*支/);
   return m ? parseInt(m[1]) : null;
+}
+
+// ============================================================
+// 非剪輯任務判斷（用於計算可剪輯時間）
+// ============================================================
+function isNonEditingTask(task) {
+  const editing = /剪[片輯了編]|短影音剪|後製|剪接/;
+  const nonEditing = /拍攝|拍照|直播|課程|會議|溝通|協調|設備|架設|外拍|外出|準備|整理|字幕排程|行政|現場|採購|場勘|巡場|簡報|討論/;
+  return nonEditing.test(task) && !editing.test(task);
+}
+
+// 依可剪輯時間計算最低影片數標準
+function minVideosFromAvailableTime(availableMins) {
+  if (availableMins >= 240) return 3;   // 4 小時以上 → 3 支
+  if (availableMins >= 150) return 2;   // 2.5–4 小時 → 2 支
+  if (availableMins >= 60)  return 1;   // 1–2.5 小時 → 1 支
+  return 0;                             // 1 小時以下 → 0–1 支
 }
 
 // ============================================================
@@ -110,34 +141,30 @@ function parseWorkLog(text) {
   if (!videoMatch) return { error: '缺少「影片數量」欄位，或數量非數字' };
   const videoCount = parseInt(videoMatch[1]);
 
-  // --- 時間記錄 ---
+  // --- 時間記錄（選填）---
+  // 有時間 → 用時間輔助計算；沒有或格式不標準 → 忽略時間，不拒絕日誌
   const timeLogMatch = normalized.match(/時間記錄:\s*\n([\s\S]+?)(?=備註:|$)/);
-  if (!timeLogMatch) return { error: '缺少「時間記錄」欄位' };
-  const timeLogRaw = timeLogMatch[1].trim();
+  const timeLogRaw = timeLogMatch ? timeLogMatch[1].trim() : '';
 
   const timeEntries = [];
-  const linePattern = /(\d{1,2}:\d{2})\s*[-–—]\s*(\d{1,2}:\d{2})\s+(.+)/g;
-  let m;
-  while ((m = linePattern.exec(timeLogRaw)) !== null) {
-    const startTime = m[1];
-    const endTime   = m[2];
-    const task      = m[3].trim();
-    const rawDuration = durationMinutes(startTime, endTime);
-    if (rawDuration <= 0) continue;
+  if (timeLogRaw) {
+    const linePattern = /(\d{1,2}:\d{2})\s*[-–—]\s*(\d{1,2}:\d{2})\s+(.+)/g;
+    let m;
+    while ((m = linePattern.exec(timeLogRaw)) !== null) {
+      const startTime = m[1];
+      const endTime   = m[2];
+      const task      = m[3].trim();
+      const rawDuration = durationMinutes(startTime, endTime);
+      if (rawDuration <= 0) continue;
 
-    // 直接以任務時段長度計算，不扣除任何固定午休
-    const effectiveMins = rawDuration;
-    // 修正五：批量剪輯支數（先從任務名稱抓，若無則對剪輯任務用總影片數）
-    let batchCount = parseBatchCount(task);
-    if (!batchCount && /剪[片輯了編]|短影音剪/.test(task) && videoCount > 0) {
-      batchCount = videoCount;
+      const effectiveMins = rawDuration;
+      let batchCount = parseBatchCount(task);
+      if (!batchCount && /剪[片輯了編]|短影音剪/.test(task) && videoCount > 0) {
+        batchCount = videoCount;
+      }
+
+      timeEntries.push({ startTime, endTime, task, duration: rawDuration, effectiveMins, batchCount });
     }
-
-    timeEntries.push({ startTime, endTime, task, duration: rawDuration, effectiveMins, batchCount });
-  }
-
-  if (timeEntries.length === 0) {
-    return { error: '時間記錄格式有誤，請使用「09:00-10:30 任務名稱」格式，每條記錄佔一行' };
   }
 
   // --- 備註（選填）---
@@ -230,37 +257,55 @@ async function buildSystemPrompt() {
   return `你是 VLB/漢芳療 設計部的工作查核助理，負責分析社群小編每日工作日誌。
 請依照以下規則判斷，只回傳 JSON，不要有任何其他文字或 markdown。
 
+【重要前提：時間記錄是選填的】
+- 有時間記錄 → 用時間輔助計算
+- 沒有時間記錄 → 依影片數量和任務內容判斷合理性
+- 時間格式不標準 → 系統已盡量解析，解析不了的已忽略
+- 格式問題永遠不是拒絕或標記異常的理由
+
 【前置處理說明（已由系統計算完畢）】
-- effective_total_hours = 所有有任務記錄的時段直接加總（不扣除任何固定午休）+ 發布工時（每平台 9 分鐘）
+- effective_total_hours = 所有有任務記錄的時段直接加總（不扣除任何固定午休）
 - 批量剪輯時，per_video_mins = 該時間段工時 ÷ 支數（已在明細中提供）
+- available_editing_mins = 總工時 - 非剪輯任務時間（已計算，見明細）
 
 【判斷順序（產出優先）】
-步驟一：影片數量是否達標（依各工作類型最低影片數）
-        批量剪輯時，per_video_mins ≤ 120 分鐘才算達標；超過則必須標記，即使其他項目正常
-步驟二：是否有輪播、發布、限動等其他任務的記錄
-步驟三：有效總工時是否達到 ${minHours} 小時
+步驟一：影片數量是否合理（依可剪輯時間階梯標準，見下方）
+        批量剪輯時，per_video_mins ≤ 120 分鐘才算達標
+步驟二：任務內容是否合理（無明顯異常即可）
+步驟三：若有時間記錄，有效總工時是否達到 ${minHours} 小時
 
-三項皆達標（批量剪輯時 per_video_mins 亦需 ≤ 120）→ status 設為 "normal"，anomalies 陣列留空，不標記任何異常
-有任何一項未達標，或批量剪輯 per_video_mins > 120 → 才進行個別任務時間詳細檢查
+【影片數量合理性——依可剪輯時間的階梯標準（最重要）】
+可剪輯時間 = 總工時 - 非剪輯任務時間（拍攝/直播/課程/會議/協調/設備架設等）
 
-【各工作類型最低影片數】
+可剪輯時間 ≥ 4 小時    → 3 支為正常標準
+可剪輯時間 2.5–4 小時  → 2 支即達標
+可剪輯時間 1–2.5 小時  → 1 支即達標
+可剪輯時間 < 1 小時    → 0 支可接受
+
+沒有時間記錄時，以工作類型預設標準判斷：
 ${dayTypeText}
+
+【課程日（各角色）特別說明】
+課程日（拍攝組）、課程日（拍照組）、課程日（限動組）、課程日（行政支援）：
+- 影片數量 0 支為完全正常，不標記異常
+- 主要任務是課程拍攝與現場記錄，不需常規剪輯或輪播產出
+- 不得因影片數量為 0 或無輪播記錄而標記
+
+【大型活動日特別說明】
 - 大型活動日（限動組）：查核限動數量，活動日須有 3–5 則限時動態
 - 大型活動日（拍照修片組）：查核照片產出，基本要求：大合照 1 張、現場照+老師照合計 3–5 張
 
-【影片數量評估——含非剪輯任務時的放寬規則（重要）】
-若時間記錄中有大量非剪輯任務（溝通協調、設備架設、直播準備、外部聯繫、整理帳號、字幕排程等），
-這些任務佔用了原可用於剪輯的時間，影片數量標準應按以下方式評估：
-1. 計算「可用剪輯時間」= 總有效工時 - 非剪輯任務時間
-2. 若「可用剪輯時間 ÷ 影片數量 ≤ 120 分鐘/支」，則影片數量達標，不應標記
-非剪輯任務合計超過 120 分鐘時，務必套用此放寬邏輯再判斷，不可直接套用最低影片數標準。
+【發布任務不需在工作日誌中出現（重要）】
+- 發布是獨立的回報方式（已發布｜平台｜帳號），不需在時間記錄中重複列出
+- 只要工作日誌有剪輯、直播、限動製作、拍攝、輪播等相關工作，絕對不標記「缺少發布記錄」
+- 只有當日誌完全沒有任何內容產出相關任務時，才考慮標記
 
-【發布任務判斷規則（重要）】
-- 實際發布（貼文上傳、限時動態發布）可透過獨立的「已發布｜平台｜帳號」訊息提交，不需在工作日誌時間記錄中重複列出
-- 若時間記錄已包含直播、剪輯、修照、限動製作、輪播製作等相關工作，即使沒有「發布」關鍵字，也不應標記「缺少發布記錄」
-- 只有當工作日誌完全沒有任何跟發布、限動、直播相關的任務時，才標記缺少
+【批量剪輯計算（確保一致性）】
+若某時間段任務包含「剪 N 支」，per_video_mins = 時段工時 ÷ N
+per_video_mins > 120 分鐘 → 標記異常
+per_video_mins ≤ 120 分鐘 → 正常，不標記
 
-【各任務合理時間範圍】
+【各任務合理時間範圍（僅在有時間記錄且其他項目異常時才檢查）】
 ${taskTimeText}
 
 【空白時段規則】
@@ -268,12 +313,11 @@ ${taskTimeText}
 - 只有當空白時段超過 ${maxGap} 分鐘時，才標記為異常
 
 【異常描述格式（重要）】
-任務超時時，不顯示具體分鐘數，依程度描述：
+任務超時：依程度描述（不顯示具體分鐘數）
 - 超過上限 110–130%：「[任務名稱] 耗時稍長」
 - 超過上限 130% 以上：「[任務名稱] 耗時明顯較長，建議確認」
-工時未達 ${minHours} 小時時：輸出「時數未達標準」，不顯示具體小時數
-空白時段超過上限時：輸出「有較長空白時段，建議確認」，不顯示具體分鐘數
-影片數量不足的描述維持原格式。
+時數不足：輸出「時數未達標準」，不顯示具體小時數
+空白過長：輸出「有較長空白時段，建議確認」，不顯示具體分鐘數
 
 【回傳格式（嚴格 JSON，不含 markdown）】
 {
@@ -326,15 +370,23 @@ async function analyzeWorkLog(parsedLog, memberName) {
     `影片數量：${parsedLog.videoCount} 支`,
     `限時動態數量：${parsedLog.limitedStoryCount || 0} 則`,
     `有效總工時：${parsedLog.effectiveTotalHours} 小時（${parsedLog.effectiveTotalMinutes} 分鐘）`,
-    `  └ 其中發布工時：${parsedLog.publishMinutes} 分鐘（從非時間段行的發布記錄計算）`,
+    (() => {
+      if (parsedLog.timeEntries.length === 0) return '（無時間記錄，依影片數量和任務內容判斷）';
+      const nonEditingMins = parsedLog.timeEntries
+        .filter(e => isNonEditingTask(e.task))
+        .reduce((sum, e) => sum + e.effectiveMins, 0);
+      const availableMins = Math.max(0, parsedLog.effectiveTotalMinutes - nonEditingMins);
+      const adjustedMin = minVideosFromAvailableTime(availableMins);
+      return `  └ 非剪輯任務：${nonEditingMins} 分鐘，可剪輯時間：${availableMins} 分鐘 → 標準最低 ${adjustedMin} 支`;
+    })(),
     ``,
     `時間記錄明細：`,
-    ...parsedLog.timeEntries.map(e => {
+    ...(parsedLog.timeEntries.length > 0 ? parsedLog.timeEntries.map(e => {
       const batchNote = e.batchCount
         ? `（${e.batchCount} 支，per_video_mins=${Math.round(e.effectiveMins / e.batchCount)}）`
         : '';
       return `  ${e.startTime}–${e.endTime}（有效 ${e.effectiveMins} 分鐘）：${e.task}${batchNote}`;
-    }),
+    }) : ['  （無）']),
     ``,
     `空白時段：`,
     parsedLog.gaps.length === 0
@@ -387,12 +439,32 @@ async function localFallbackAnalysis(parsedLog) {
   const minHours  = parseFloat(sopSettings['最低工時_小時'] || '6');
   const maxGapMin = parseInt(sopSettings['空白時段上限_分'] || '120');
 
-  // 步驟一：影片數量
-  const dayRule   = dayTypeRules.find(r => r.工作類型 === parsedLog.dayType);
-  const minVideos = dayRule ? dayRule.最低影片數 : 3;
-  const videoOk   = parsedLog.videoCount >= minVideos;
+  // 課程日：影片 0 支完全正常，直接回傳 normal
+  if (COURSE_DAY_TYPES.has(parsedLog.dayType)) {
+    return {
+      status: 'normal', video_count_ok: true, time_log_ok: true,
+      total_hours: parsedLog.effectiveTotalHours, anomalies: [],
+      summary: '課程日記錄正常',
+    };
+  }
 
-  // 批量剪輯每支平均時間（此項必須獨立檢查，不受早期回傳邏輯跳過）
+  // 步驟一：影片數量（依可剪輯時間階梯標準）
+  let minVideos;
+  if (parsedLog.timeEntries.length > 0) {
+    // 有時間記錄 → 計算可剪輯時間
+    const nonEditingMins = parsedLog.timeEntries
+      .filter(e => isNonEditingTask(e.task))
+      .reduce((sum, e) => sum + e.effectiveMins, 0);
+    const availableMins = Math.max(0, parsedLog.effectiveTotalMinutes - nonEditingMins);
+    minVideos = minVideosFromAvailableTime(availableMins);
+  } else {
+    // 無時間記錄 → 用工作類型預設標準
+    const dayRule = dayTypeRules.find(r => r.工作類型 === parsedLog.dayType);
+    minVideos = dayRule ? dayRule.最低影片數 : 3;
+  }
+  const videoOk = parsedLog.videoCount >= minVideos;
+
+  // 批量剪輯每支平均時間（確定性檢查，不受早期回傳跳過）
   const batchAnomalies = [];
   for (const entry of parsedLog.timeEntries) {
     if (entry.batchCount && entry.batchCount > 0) {
@@ -403,34 +475,30 @@ async function localFallbackAnalysis(parsedLog) {
     }
   }
 
-  // 步驟三：有效總工時
-  const hoursOk = parsedLog.effectiveTotalHours >= minHours;
+  // 步驟三：有效總工時（無時間記錄時略過）
+  const hasTimeLog = parsedLog.timeEntries.length > 0;
+  const hoursOk = !hasTimeLog || parsedLog.effectiveTotalHours >= minHours;
 
-  // 修正二：三步皆達標（含批量剪輯速度）→ 直接回傳正常，不做個別檢查
+  // 三步皆達標 → 正常
   if (videoOk && hoursOk && batchAnomalies.length === 0) {
     return {
-      status:         'normal',
-      video_count_ok: true,
-      time_log_ok:    true,
-      total_hours:    parsedLog.effectiveTotalHours,
-      anomalies:      [],
-      summary:        '工作記錄正常',
+      status: 'normal', video_count_ok: true, time_log_ok: true,
+      total_hours: parsedLog.effectiveTotalHours, anomalies: [],
+      summary: '工作記錄正常',
     };
   }
 
-  // 有任何未達標 → 進入詳細檢查（批量異常已在上方收集，直接帶入）
   const anomalies = [...batchAnomalies];
 
   if (!videoOk) {
-    anomalies.push(`影片數量 ${parsedLog.videoCount} 支，低於 ${parsedLog.dayType} 標準（${minVideos} 支）`);
+    anomalies.push(`影片數量 ${parsedLog.videoCount} 支，低於當日標準（${minVideos} 支）`);
   }
   if (!hoursOk) {
     anomalies.push('時數未達標準');
   }
 
   for (const entry of parsedLog.timeEntries) {
-    if (entry.batchCount && entry.batchCount > 0) continue; // 已在 batchAnomalies 處理
-
+    if (entry.batchCount && entry.batchCount > 0) continue;
     const rule = taskTimeRules.find(r => entry.task.includes(r.任務關鍵字));
     if (!rule) continue;
     const anomalyLimit = rule.任務關鍵字 === '輪播' ? 150 : rule.異常上限_分;
@@ -442,11 +510,11 @@ async function localFallbackAnalysis(parsedLog) {
   for (const gap of parsedLog.gaps) {
     if (gap.minutes > maxGapMin) {
       anomalies.push('有較長空白時段，建議確認');
-      break; // 同一天只標記一次
+      break;
     }
   }
 
-  const timeOk = !anomalies.some(a => a.includes('空白') || a.includes('耗時') || a.includes('工時'));
+  const timeOk = !anomalies.some(a => a.includes('空白') || a.includes('耗時') || a.includes('時數'));
   const status = !videoOk ? 'alert' : (anomalies.length > 0 ? 'warning' : 'normal');
 
   return {

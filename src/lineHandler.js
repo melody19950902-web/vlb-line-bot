@@ -21,18 +21,19 @@ const FORMAT_ERROR_HINT = `
 正常日、外拍日、直播日、外拍半天、外拍一天
 大型活動日（短影音組）
 大型活動日（限動組）
-大型活動日（拍照修片組）`.trim();
+大型活動日（拍照修片組）
+課程日（拍攝組）、課程日（拍照組）
+課程日（限動組）、課程日（行政支援）`.trim();
 
 // ============================================================
 // 訊息類型偵測
 // ============================================================
 
-// 完整工作日誌（含三個必要欄位）
+// 完整工作日誌（今日類型 + 影片數量即可，時間記錄為選填）
 function isWorkLog(text) {
   return text
     && text.includes('今日類型')
-    && text.includes('影片數量')
-    && text.includes('時間記錄');
+    && text.includes('影片數量');
 }
 
 // 發布回報（單獨傳入的 "已發布｜平台｜帳號" 訊息）
@@ -87,7 +88,9 @@ async function getMemberDisplayName(userId, client, source) {
 
 async function processWorkLog(text, userId, client, source) {
   const parsedLog = parseWorkLog(text);
-  if (parsedLog.error) {
+
+  // 今日類型或影片數量解析失敗才回覆錯誤（其餘格式問題一律靜默接收）
+  if (parsedLog.error && (parsedLog.error.includes('今日類型') || parsedLog.error.includes('影片數量'))) {
     return `❌ 日誌格式有誤\n\n問題：${parsedLog.error}\n\n${FORMAT_ERROR_HINT}`;
   }
 
@@ -97,9 +100,11 @@ async function processWorkLog(text, userId, client, source) {
 
   await saveWorkLog({
     date, time, name: memberName, lineUserId: userId,
-    dayType: parsedLog.dayType, videoCount: parsedLog.videoCount,
-    timeLog: parsedLog.timeLogRaw, status: 'pending',
-    anomalies: [], notes: parsedLog.notes,
+    dayType:    parsedLog.dayType    || '未知',
+    videoCount: parsedLog.videoCount ?? 0,
+    timeLog:    parsedLog.timeLogRaw || text,
+    status: 'pending',
+    anomalies: [], notes: parsedLog.notes || '',
   });
 
   return null; // 全天靜默收資料，22:30 統一查核
