@@ -279,10 +279,15 @@ async function sendDailySummary(client) {
   groupLines.push(...footer);
   adminLines.push(...footer);
 
-  await Promise.all([
-    notifyAdminLine(client, adminLines.join('\n')),
-    notifyGroup(client, groupLines.join('\n')),
-  ]);
+  // 群組推播開關：穩定觀察期間僅推給主管，待後台穩定後設為 true
+  const groupEnabled = process.env.GROUP_NOTIFY_ENABLED === 'true';
+  const tasks = [notifyAdminLine(client, adminLines.join('\n'))];
+  if (groupEnabled) {
+    tasks.push(notifyGroup(client, groupLines.join('\n')));
+  } else {
+    console.log('🔕 GROUP_NOTIFY_ENABLED 未開啟，本次彙整僅推播主管');
+  }
+  await Promise.all(tasks);
 
   // 月度異常記錄與達標通報
   for (const { name, anomalyType } of monthlyToRecord) {
