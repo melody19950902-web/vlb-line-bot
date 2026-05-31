@@ -28,21 +28,25 @@ const FORMAT_ERROR_HINT = `
 
 // 完整工作日誌（今日類型 + 影片數量即可，時間記錄為選填）
 function isWorkLog(text) {
-  return text
+  return !!(text
     && text.includes('今日類型')
-    && text.includes('影片數量');
+    && text.includes('影片數量'));
 }
 
 // 發布回報（單獨傳入的 "已發布｜平台｜帳號" 訊息）
 function isPublishReport(text) {
-  return text && /^已發布[｜|]/.test(text.trim());
+  return !!(text && /^已發布[｜|]/.test(text.trim()));
 }
 
 // 請假 / 補休（靜默記錄，不回覆）
+// 今日格式：今日病假、今日事假、今日請假
 // 明天格式：明天請假、明天休假、明天補休、明天補休半天、明天早上/下午補休半天、明天補休 X 小時
 function parseLeaveRequest(text) {
   if (!text) return null;
   const t = text.trim();
+  if (t === '今日病假') return { leaveType: '病假', isToday: true };
+  if (t === '今日事假') return { leaveType: '事假', isToday: true };
+  if (t === '今日請假') return { leaveType: '請假', isToday: true };
   if (t === '明天請假' || t === '明天請假一天') return { leaveType: '請假', isToday: false };
   if (t === '明天休假' || t === '明天休假一天') return { leaveType: '休假', isToday: false };
   if (t === '明天補休') return { leaveType: '補休', isToday: false };
@@ -242,4 +246,4 @@ async function handleEvent(event, client) {
   });
 }
 
-module.exports = { handleEvent };
+module.exports = { handleEvent, isWorkLog, isPublishReport, parseLeaveRequest };

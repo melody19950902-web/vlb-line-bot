@@ -214,6 +214,21 @@ async function sendDailySummary(client) {
       const parsedLog = parseWorkLog(fullLogText);
       if (parsedLog.error) {
         console.error(`22:30 重新解析失敗 ${name}：${parsedLog.error}`);
+        // 解析失敗：更新為 warning，不讓 pending 卡死
+        const time = getTaiwanTimeString();
+        const failAnomalies = ['分析失敗，請人工確認'];
+        await saveWorkLog({
+          date: today, time, name, lineUserId: row[3],
+          dayType: row[4] || '未知', videoCount: parseInt(row[5]) || 0,
+          timeLog: mergedTimeLog, status: 'warning',
+          anomalies: failAnomalies, notes: row[9] || '',
+        });
+        latestByName.set(name, [
+          today, time, name, row[3],
+          row[4] || '未知', row[5] || '0',
+          mergedTimeLog, 'warning',
+          failAnomalies.join('；'), row[9] || '',
+        ]);
         continue;
       }
 
@@ -240,6 +255,25 @@ async function sendDailySummary(client) {
       ]);
     } catch (err) {
       console.error(`22:30 分析 ${name} 失敗：`, err.message);
+      // 例外：更新為 warning，不讓 pending 卡死
+      try {
+        const time = getTaiwanTimeString();
+        const failAnomalies = ['分析失敗，請人工確認'];
+        await saveWorkLog({
+          date: today, time, name, lineUserId: row[3],
+          dayType: row[4] || '未知', videoCount: parseInt(row[5]) || 0,
+          timeLog: row[6] || '', status: 'warning',
+          anomalies: failAnomalies, notes: row[9] || '',
+        });
+        latestByName.set(name, [
+          today, time, name, row[3],
+          row[4] || '未知', row[5] || '0',
+          row[6] || '', 'warning',
+          failAnomalies.join('；'), row[9] || '',
+        ]);
+      } catch (saveErr) {
+        console.error(`22:30 寫入失敗記錄也失敗 ${name}：`, saveErr.message);
+      }
     }
   }
 
@@ -339,8 +373,8 @@ async function sendDailySummary(client) {
   }
   await Promise.all(tasks);
 
-  // 月度異常記錄與達標通報
-  for (const { name, anomalyType } of monthlyToRecord) {
+  // 月度異常記錄與達標通報（並行化）
+  await Promise.all(monthlyToRecord.map(async ({ name, anomalyType }) => {
     await saveMonthlyRecord({ month, name, date: today, anomalyType });
 
     const records = await getMonthlyAnomalies(month, name);
@@ -356,7 +390,7 @@ async function sendDailySummary(client) {
       ].join('\n');
       await notifyAdminLine(client, alertMsg);
     }
-  }
+  }));
 
   // 月底：發送當月影片統計
   const todayDate = new Date();
