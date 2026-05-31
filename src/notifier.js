@@ -168,10 +168,77 @@ async function sendMonthlyVideoReport(client, month, allMembers) {
 }
 
 // ============================================================
+// 工具：台灣時間今天是否為週六
+// ============================================================
+
+function isTaiwanSaturday() {
+  const taiwanDate = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
+  return taiwanDate.getDay() === 6;
+}
+
+// ============================================================
+// 週六發布查核（只確認有無發布回報，不查工作日誌）
+// ============================================================
+
+async function sendSaturdaySummary(client) {
+  const today = getTaiwanDateString();
+
+  const [allMembers, leaveRecords, publishReportMap] = await Promise.all([
+    getAllMemberNames(),
+    getLeaveRecordsForDate(today),
+    getTodayPublishReports(),
+  ]);
+
+  const leaveTypeMap = new Map();
+  for (const r of leaveRecords) {
+    if (r[2]) leaveTypeMap.set(r[2], r[4] || '請假');
+  }
+
+  const header = [`📢 VLB 週六發布查核 ${today}`, ``];
+  const lines = [...header];
+  const notPublished = [];
+
+  for (const name of allMembers) {
+    const leaveType = leaveTypeMap.get(name);
+    if (leaveType === '病假') { lines.push(`🏥 ${name}｜病假`); continue; }
+    if (leaveType === '事假') { lines.push(`📋 ${name}｜事假`); continue; }
+    if (leaveType)            { lines.push(`🏖️ ${name}｜休假`); continue; }
+
+    const reports = publishReportMap.get(name) || [];
+    if (reports.length > 0) {
+      lines.push(`✅ ${name}｜已發布`);
+    } else {
+      lines.push(`❗ ${name}｜未發布`);
+      notPublished.push(name);
+    }
+  }
+
+  lines.push(``);
+  if (notPublished.length === 0) {
+    lines.push(`全員已完成週六發布，辛苦了！`);
+  } else {
+    lines.push(`請 ${notPublished.join('、')} 確認發布狀況。`);
+  }
+
+  const msg = lines.join('\n');
+  const groupEnabled = process.env.GROUP_NOTIFY_ENABLED === 'true';
+  const tasks = [notifyAdminLine(client, msg)];
+  if (groupEnabled) tasks.push(notifyGroup(client, msg));
+  await Promise.all(tasks);
+
+  console.log(`📢 週六發布查核已發送，未發布：${notPublished.length} 人`);
+}
+
+// ============================================================
 // 每日 22:30 彙整（全 6 人逐人列出）
 // ============================================================
 
 async function sendDailySummary(client) {
+  // 週六只查發布，不查工作日誌
+  if (isTaiwanSaturday()) {
+    return sendSaturdaySummary(client);
+  }
+
   const today = getTaiwanDateString();
   const month = getTaiwanMonthString();
 
