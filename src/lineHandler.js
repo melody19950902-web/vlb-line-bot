@@ -2,6 +2,7 @@
 const { parseWorkLog, detectSpecialDayType } = require('./analyzer');
 const { saveWorkLog, savePublishReport, saveLeaveRecord, getMemberName,
         getTaiwanDateString, getTaiwanTimeString }           = require('./sheets');
+
 const { handleCommand }                                      = require('./commands');
 
 // ============================================================
@@ -37,19 +38,17 @@ function isPublishReport(text) {
   return text && /^已發布[｜|]/.test(text.trim());
 }
 
-// 請假 / 補休 / 當天臨時請假（靜默記錄，不回覆）
-// 明天格式：明天請假、明天補休半天、明天補休 X 小時
-// 當天格式：今日病假、今日事假
+// 請假 / 補休（靜默記錄，不回覆）
+// 明天格式：明天請假、明天休假、明天補休、明天補休半天、明天早上/下午補休半天、明天補休 X 小時
 function parseLeaveRequest(text) {
   if (!text) return null;
   const t = text.trim();
-  // 當天臨時請假（isToday = true，記錄今天日期）
-  if (t === '今日病假') return { leaveType: '病假', hours: null, isToday: true };
-  if (t === '今日事假') return { leaveType: '事假', hours: null, isToday: true };
-  // 隔天預告請假
-  if (t === '明天請假') return { leaveType: '請假', hours: null, isToday: false };
-  const halfMatch = t.match(/^明天補休半天$/);
-  if (halfMatch) return { leaveType: '補休', hours: 0.5, isToday: false };
+  if (t === '明天請假' || t === '明天請假一天') return { leaveType: '請假', isToday: false };
+  if (t === '明天休假' || t === '明天休假一天') return { leaveType: '休假', isToday: false };
+  if (t === '明天補休') return { leaveType: '補休', isToday: false };
+  if (t === '明天補休半天') return { leaveType: '補休', hours: 4, isToday: false };
+  if (t === '明天早上補休半天') return { leaveType: '補休', hours: 4, session: '早上', isToday: false };
+  if (t === '明天下午補休半天') return { leaveType: '補休', hours: 4, session: '下午', isToday: false };
   const hoursMatch = t.match(/^明天補休\s*(\d+(?:\.\d+)?)\s*小時$/);
   if (hoursMatch) return { leaveType: '補休', hours: parseFloat(hoursMatch[1]), isToday: false };
   return null;
@@ -161,7 +160,7 @@ async function processLeaveRequest(text, userId, client, source, leaveInfo) {
   });
 
   // 靜默記錄，不回覆任何訊息
-  console.log(`📋 請假記錄：${memberName} ${leaveDate} ${leaveInfo.leaveType}`);
+  console.log(`📋 [請假記錄] 寫入完成 | 小編：${memberName} | 請假日期：${leaveDate} | 類型：${leaveInfo.leaveType} | 提交時間：${submitTime}`);
 }
 
 // ============================================================
@@ -169,7 +168,24 @@ async function processLeaveRequest(text, userId, client, source, leaveInfo) {
 // ============================================================
 
 async function handleEvent(event, client) {
-  if (event.type !== 'message' || event.message.type !== 'text') return;
+  if (event.type !== 'message') return;
+
+  // 圖片/影片查重（僅群組）
+  if (event.message.type === 'image' || event.message.type === 'video') {
+    if (event.source.type === 'group') {
+      try {
+        const { processMedia } = require('./fingerprint');
+        const memberName = await getMemberDisplayName(event.source.userId, client, event.source);
+        const date = getTaiwanDateString();
+        await processMedia(client, event.message.id, event.message.type, memberName, date);
+      } catch (err) {
+        console.error('媒體查重失敗：', err.message);
+      }
+    }
+    return;
+  }
+
+  if (event.message.type !== 'text') return;
 
   const text       = event.message.text;
   const replyToken = event.replyToken;

@@ -5,7 +5,7 @@ const {
   getTaiwanDateString, getTaiwanTimeString,
   saveWorkLog, getTodayPublishReports,
   saveMonthlyRecord, getMonthlyAnomalies, getTaiwanMonthString,
-  getSopSettings,
+  getSopSettings, getMonthLogs, saveMonthlyVideoStats,
 } = require('./sheets');
 const { parseWorkLog, analyzeWorkLog } = require('./analyzer');
 
@@ -121,6 +121,53 @@ async function sendAnomalyAlert(client, { memberName, dayType, anomalies, date, 
 }
 
 // ============================================================
+// 月底影片數量統計
+// ============================================================
+
+async function sendMonthlyVideoReport(client, month, allMembers) {
+  try {
+    const logs = await getMonthLogs(month);
+
+    // 每人每天取最後一筆，再加總
+    const latestPerDay = new Map(); // `${name}_${date}` → videoCount
+    for (const row of logs) {
+      if (!row[2] || !row[0]) continue;
+      const key = `${row[2]}_${row[0]}`;
+      latestPerDay.set(key, parseInt(row[5]) || 0);
+    }
+
+    const totalByMember = new Map();
+    for (const [key, count] of latestPerDay) {
+      const name = key.split('_')[0];
+      totalByMember.set(name, (totalByMember.get(name) || 0) + count);
+    }
+
+    const [year, monthNum] = month.split('/');
+    const lines = [`📊 VLB ${year}年${parseInt(monthNum)}月｜當月影片剪輯統計`, ``];
+
+    let total = 0;
+    for (const name of allMembers) {
+      const count = totalByMember.get(name) || 0;
+      total += count;
+      lines.push(`${name}：${count} 支`);
+    }
+    lines.push(``, `團隊本月合計：${total} 支`);
+
+    await notifyAdminLine(client, lines.join('\n'));
+
+    // 寫入月度記錄
+    for (const name of allMembers) {
+      const count = totalByMember.get(name) || 0;
+      await saveMonthlyVideoStats({ month, name, videoCount: count });
+    }
+
+    console.log(`📊 月度影片統計已發送：${month} 合計 ${total} 支`);
+  } catch (err) {
+    console.error('月度統計失敗：', err.message);
+  }
+}
+
+// ============================================================
 // 每日 22:30 彙整（全 6 人逐人列出）
 // ============================================================
 
@@ -135,6 +182,8 @@ async function sendDailySummary(client) {
     getTodayPublishReports(),
     getSopSettings(),
   ]);
+
+  console.log(`📂 [請假記錄] 今日(${today})共 ${leaveRecords.length} 筆請假記錄：${leaveRecords.map(r => r[2]).join('、') || '無'}`);
 
   const minHours = parseFloat(sopSettings['最低工時_小時'] || '6');
   const hoursDetailMap = new Map(); // name → { actual: 實際時數 }
@@ -208,6 +257,7 @@ async function sendDailySummary(client) {
   const monthlyToRecord = [];
 
   for (const name of allMembers) {
+    console.log(`🔍 [22:30查核] ${name} | 請假=${leaveTypeMap.get(name) || '無'} | 工作日誌=${latestByName.has(name) ? '有' : '無'}`);
     const leaveType = leaveTypeMap.get(name);
 
     if (leaveType === '病假') {
@@ -307,6 +357,14 @@ async function sendDailySummary(client) {
       await notifyAdminLine(client, alertMsg);
     }
   }
+
+  // 月底：發送當月影片統計
+  const todayDate = new Date();
+  const tomorrowDate = new Date(todayDate);
+  tomorrowDate.setDate(tomorrowDate.getDate() + 1);
+  if (tomorrowDate.getMonth() !== todayDate.getMonth()) {
+    await sendMonthlyVideoReport(client, month, allMembers);
+  }
 }
 
-module.exports = { notifyAdminLine, notifyGroup, sendEmailAlert, sendAnomalyAlert, sendDailySummary };
+module.exports = { notifyAdminLine, notifyGroup, sendEmailAlert, sendAnomalyAlert, sendDailySummary, sendMonthlyVideoReport };

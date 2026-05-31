@@ -334,6 +334,36 @@ function getThisWeekRange() {
   };
 }
 
+// ============================================================
+// 內容指紋（查重）
+// 欄位：日期 | 姓名 | 類型 | 雜湊 | 雲端連結
+// ============================================================
+
+async function saveFingerprint({ date, name, fileType, hash, driveLink }) {
+  return appendRow('內容指紋', [date, name, fileType, hash, driveLink || '']);
+}
+
+async function getFingerprints(fileType) {
+  const rows = await readRange('內容指紋!A:E');
+  if (!rows || rows.length < 2) return [];
+  return rows.slice(1).filter(r => r[2] === fileType);
+}
+
+// ============================================================
+// 月度影片記錄
+// 欄位：月份 | 姓名 | 類型 | 數量
+// ============================================================
+
+async function getMonthLogs(month) {
+  const rows = await readRange('工作記錄!A:J');
+  if (!rows || rows.length < 2) return [];
+  return rows.slice(1).filter(row => row[0] && row[0].startsWith(month));
+}
+
+async function saveMonthlyVideoStats({ month, name, videoCount }) {
+  return appendRow('月度記錄', [month, name, '影片統計', String(videoCount)]);
+}
+
 module.exports = {
   getSopSettings,
   getTaskTimeRules,
@@ -349,6 +379,10 @@ module.exports = {
   getTodayPublishReports,
   saveMonthlyRecord,
   getMonthlyAnomalies,
+  saveFingerprint,
+  getFingerprints,
+  getMonthLogs,
+  saveMonthlyVideoStats,
   getTaiwanDateString,
   getTaiwanTimeString,
   getTaiwanMonthString,

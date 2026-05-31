@@ -301,19 +301,24 @@ Podcast日：
 per_video_mins > 120 分鐘 → 標記異常
 per_video_mins ≤ 120 分鐘 → 正常，不標記
 
-【各任務合理時間範圍（僅在有時間記錄且其他項目異常時才檢查）】
-${taskTimeText}
+【突發與彈性工作】
+只要時間記錄中有任務描述，該任務視為合法工作項目，不標記異常。
+非 SOP 範圍的工作（臨時協助拍攝、處理突發需求、整理課程器材、協助其他部門、研究新工具）
+只要有記錄，都是合理的工作內容。
 
-【空白時段規則】
-- 所有空白時段均視為可能的午休或彈性緩衝，不標記異常
-- 只有當空白時段超過 ${maxGap} 分鐘時，才標記為異常
+【通報門檻（只在以下情況才通報）】
+- 正常日，影片數量為 0，且備註無任何說明 → alert
+- 工作記錄加總低於 6 小時且無合理原因 → warning
+- 批量剪輯 per_video_mins > 120 → warning
+
+以下不通報：
+- 任務時間超過 SOP 建議範圍
+- 影片數量比標準少但有其他任務記錄
+- 格式不標準或工作內容超出 SOP
+- 單一任務超過建議時間（3 小時內皆可接受）
 
 【異常描述格式（重要）】
-任務超時：依程度描述（不顯示具體分鐘數）
-- 超過上限 110–130%：「[任務名稱] 耗時稍長」
-- 超過上限 130% 以上：「[任務名稱] 耗時明顯較長，建議確認」
 時數不足：輸出「時數未達標準」，不顯示具體小時數
-空白過長：輸出「有較長空白時段，建議確認」，不顯示具體分鐘數
 
 【回傳格式（嚴格 JSON，不含 markdown）】
 {
@@ -426,14 +431,12 @@ function overtimeDescription(taskName, actualMins, limitMins) {
 // ============================================================
 
 async function localFallbackAnalysis(parsedLog) {
-  const [sopSettings, taskTimeRules, dayTypeRules] = await Promise.all([
+  const [sopSettings, dayTypeRules] = await Promise.all([
     getSopSettings(),
-    getTaskTimeRules(),
     getDayTypeRules(),
   ]);
 
-  const minHours  = parseFloat(sopSettings['最低工時_小時'] || '6');
-  const maxGapMin = parseInt(sopSettings['空白時段上限_分'] || '120');
+  const minHours = parseFloat(sopSettings['最低工時_小時'] || '6');
 
   // 課程日：影片 0 支完全正常，直接回傳 normal
   if (COURSE_DAY_TYPES.has(parsedLog.dayType)) {
@@ -444,23 +447,16 @@ async function localFallbackAnalysis(parsedLog) {
     };
   }
 
-  // 步驟一：影片數量（依可剪輯時間階梯標準）
-  let minVideos;
+  // 可剪輯時間計算（有時間記錄時才計算）
   if (parsedLog.timeEntries.length > 0) {
-    // 有時間記錄 → 計算可剪輯時間
     const nonEditingMins = parsedLog.timeEntries
       .filter(e => isNonEditingTask(e.task))
       .reduce((sum, e) => sum + e.effectiveMins, 0);
     const availableMins = Math.max(0, parsedLog.effectiveTotalMinutes - nonEditingMins);
-    minVideos = minVideosFromAvailableTime(availableMins);
-  } else {
-    // 無時間記錄 → 用工作類型預設標準
-    const dayRule = dayTypeRules.find(r => r.工作類型 === parsedLog.dayType);
-    minVideos = dayRule ? dayRule.最低影片數 : 3;
+    void availableMins; // 保留計算供日誌查看，不用於判斷
   }
-  const videoOk = parsedLog.videoCount >= minVideos;
 
-  // 批量剪輯每支平均時間（確定性檢查，不受早期回傳跳過）
+  // 批量剪輯每支平均時間（確定性檢查）
   const batchAnomalies = [];
   for (const entry of parsedLog.timeEntries) {
     if (entry.batchCount && entry.batchCount > 0) {
@@ -471,52 +467,24 @@ async function localFallbackAnalysis(parsedLog) {
     }
   }
 
-  // 步驟三：有效總工時（無時間記錄時略過）
-  const hasTimeLog = parsedLog.timeEntries.length > 0;
-  const hoursOk = !hasTimeLog || parsedLog.effectiveTotalHours >= minHours;
+  // 影片數量異常：只在正常日且0支且無備註才標記
+  const videoAnomaly = (parsedLog.dayType === '正常日' && parsedLog.videoCount === 0 && !parsedLog.notes);
+  const videoOk = !videoAnomaly;
 
-  // 三步皆達標 → 正常
-  if (videoOk && hoursOk && batchAnomalies.length === 0) {
-    return {
-      status: 'normal', video_count_ok: true, time_log_ok: true,
-      total_hours: parsedLog.effectiveTotalHours, anomalies: [],
-      summary: '工作記錄正常',
-    };
-  }
+  // 工時（無時間記錄時略過）
+  const hasTimeLog = parsedLog.timeEntries.length > 0;
+  const hoursOk = !hasTimeLog || parsedLog.effectiveTotalHours >= minHours || !!parsedLog.notes;
 
   const anomalies = [...batchAnomalies];
+  if (!videoOk) anomalies.push('正常日影片數量為 0，請補充說明');
+  if (!hoursOk) anomalies.push('時數未達標準');
 
-  if (!videoOk) {
-    anomalies.push(`影片數量 ${parsedLog.videoCount} 支，低於當日標準（${minVideos} 支）`);
-  }
-  if (!hoursOk) {
-    anomalies.push('時數未達標準');
-  }
-
-  for (const entry of parsedLog.timeEntries) {
-    if (entry.batchCount && entry.batchCount > 0) continue;
-    const rule = taskTimeRules.find(r => entry.task.includes(r.任務關鍵字));
-    if (!rule) continue;
-    const anomalyLimit = rule.任務關鍵字 === '輪播' ? 150 : rule.異常上限_分;
-    if (entry.effectiveMins > anomalyLimit) {
-      anomalies.push(overtimeDescription(entry.task, entry.effectiveMins, anomalyLimit));
-    }
-  }
-
-  for (const gap of parsedLog.gaps) {
-    if (gap.minutes > maxGapMin) {
-      anomalies.push('有較長空白時段，建議確認');
-      break;
-    }
-  }
-
-  const timeOk = !anomalies.some(a => a.includes('空白') || a.includes('耗時') || a.includes('時數'));
-  const status = !videoOk ? 'alert' : (anomalies.length > 0 ? 'warning' : 'normal');
+  const status = !videoOk ? 'alert' : anomalies.length > 0 ? 'warning' : 'normal';
 
   return {
     status,
     video_count_ok: videoOk,
-    time_log_ok:    timeOk,
+    time_log_ok:    hoursOk,
     total_hours:    parsedLog.effectiveTotalHours,
     anomalies,
     summary: status === 'normal' ? '工作記錄正常' : `發現 ${anomalies.length} 項異常`,
