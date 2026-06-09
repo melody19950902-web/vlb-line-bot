@@ -200,6 +200,60 @@ describe('detectSpecialDayType', () => {
     expect(result.hours).toBe(2);
   });
 
+  test('跟拍日（無時數）', () => {
+    const result = detectSpecialDayType('跟拍日');
+    expect(result).not.toBeNull();
+    expect(result.dayType).toBe('跟拍日');
+    expect(result.hours).toBeNull();
+  });
+
+  test('跟拍日 3小時', () => {
+    const result = detectSpecialDayType('跟拍日 3小時');
+    expect(result).not.toBeNull();
+    expect(result.dayType).toBe('跟拍日');
+    expect(result.hours).toBe(3);
+  });
+
+  test('跟拍日半天 → 4.5 小時', () => {
+    const result = detectSpecialDayType('跟拍日半天');
+    expect(result).not.toBeNull();
+    expect(result.dayType).toBe('跟拍日');
+    expect(result.hours).toBe(4.5);
+  });
+
+  test('跟拍日一天 → 9 小時', () => {
+    const result = detectSpecialDayType('跟拍日一天');
+    expect(result).not.toBeNull();
+    expect(result.dayType).toBe('跟拍日');
+    expect(result.hours).toBe(9);
+  });
+
+  test('Podcast日 2小時', () => {
+    const result = detectSpecialDayType('Podcast日 2小時');
+    expect(result).not.toBeNull();
+    expect(result.dayType).toBe('Podcast日');
+    expect(result.hours).toBe(2);
+  });
+
+  test('Podcast日半天 → 4.5 小時', () => {
+    const result = detectSpecialDayType('Podcast日半天');
+    expect(result).not.toBeNull();
+    expect(result.dayType).toBe('Podcast日');
+    expect(result.hours).toBe(4.5);
+  });
+
+  test('isNonEditingTask：跟拍任務視為非剪輯', () => {
+    const { isNonEditingTask } = require('../src/parser');
+    expect(isNonEditingTask('09:00-12:00 跟拍活動')).toBe(true);
+    expect(isNonEditingTask('跟拍藝人')).toBe(true);
+  });
+
+  test('isNonEditingTask：剪輯跟拍素材視為剪輯（不排除）', () => {
+    const { isNonEditingTask } = require('../src/parser');
+    // 同時含剪輯 → editing 優先，不排除
+    expect(isNonEditingTask('剪輯跟拍素材')).toBe(false);
+  });
+
   test('課程日（拍攝組）簡短宣告', () => {
     const result = detectSpecialDayType('課程日（拍攝組）');
     expect(result).not.toBeNull();

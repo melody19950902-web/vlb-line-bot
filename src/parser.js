@@ -62,7 +62,7 @@ function parseBatchCount(task) {
 // ============================================================
 function isNonEditingTask(task) {
   const editing = /剪[片輯了編]|短影音剪|後製|剪接/;
-  const nonEditing = /拍攝|拍照|直播|課程|會議|溝通|協調|設備|架設|外拍|外出|準備|整理|字幕排程|行政|現場|採購|場勘|巡場|簡報|討論|Podcast|podcast|試妝|妝面|輪播貼文|輪播私文|撰寫|修改指令|文章重點|影片排程|巧睫|修圖|修照片/;
+  const nonEditing = /跟拍|拍攝|拍照|直播|課程|會議|溝通|協調|設備|架設|外拍|外出|準備|整理|字幕排程|行政|現場|採購|場勘|巡場|簡報|討論|Podcast|podcast|試妝|妝面|輪播貼文|輪播私文|撰寫|修改指令|文章重點|影片排程|巧睫|修圖|修照片/;
   return nonEditing.test(task) && !editing.test(task);
 }
 
@@ -208,8 +208,22 @@ function detectSpecialDayType(text) {
   // 課程日（含任意角色分組，如「課程日（拍攝組）」）
   if (t.startsWith('課程日')) return { dayType: t, hours: null };
 
+  // 跟拍日 / Podcast日：可附時數（例：跟拍日 3小時、Podcast日 2小時、跟拍日半天）
+  const HOURS_TYPES = ['跟拍日', 'Podcast日'];
+  for (const keyword of HOURS_TYPES) {
+    if (!t.startsWith(keyword)) continue;
+    const suffix = t.slice(keyword.length).trim();
+    if (suffix === '') return { dayType: keyword, hours: null };
+    if (suffix === '一天') return { dayType: keyword, hours: 9 };
+    if (suffix === '半天') return { dayType: keyword, hours: 4.5 };
+    const hoursMatch = suffix.match(/^(\d+(?:\.\d+)?)\s*小時$/);
+    if (hoursMatch) return { dayType: keyword, hours: parseFloat(hoursMatch[1]) };
+    // 前綴符合但格式不認識，仍接受並回傳無時數
+    return { dayType: keyword, hours: null };
+  }
+
   // 其他主要類型直接關鍵字
-  const DIRECT_KEYWORDS = ['跟拍日', '大型活動日', 'Podcast日', '直播日', '外拍半天', '外拍一天'];
+  const DIRECT_KEYWORDS = ['大型活動日', '直播日', '外拍半天', '外拍一天'];
   if (DIRECT_KEYWORDS.includes(t)) return { dayType: t, hours: null };
 
   // 舊格式相容

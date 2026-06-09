@@ -126,10 +126,14 @@ async function processSpecialDayLog(text, userId, client, source, specialDay) {
   const date       = getTaiwanDateString();
   const time       = getTaiwanTimeString();
 
+  // 若有時數，記入 notes 供 22:30 彙整參考（例：跟拍 3 小時、Podcast 4.5 小時）
+  const typeName = specialDay.dayType.replace('日', '');
+  const notes = specialDay.hours != null ? `${typeName} ${specialDay.hours} 小時` : '';
+
   await saveWorkLog({
     date, time, name: memberName, lineUserId: userId,
     dayType: specialDay.dayType, videoCount: 0,
-    timeLog: text, status: 'normal', anomalies: [], notes: '',
+    timeLog: text, status: 'normal', anomalies: [], notes,
   });
 
   return null; // 全天靜默收資料，22:30 統一查核
