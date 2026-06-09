@@ -49,13 +49,17 @@ const DEFAULT_TASK_TIME_RULES = [
 ];
 
 const DEFAULT_DAY_TYPE_RULES = [
+  // 主要類型
   { 工作類型: '正常日',     最低影片數: 3 },
+  { 工作類型: '跟拍日',     最低影片數: 0 },
+  { 工作類型: '課程日',     最低影片數: 0 },
+  { 工作類型: '大型活動日', 最低影片數: 1 },
+  // 向後相容
   { 工作類型: '拍攝日',     最低影片數: 1 },
   { 工作類型: 'Podcast日', 最低影片數: 1 },
-  { 工作類型: '課程日',     最低影片數: 0 },
+  { 工作類型: '直播日',     最低影片數: 1 },
   { 工作類型: '外拍半天',   最低影片數: 1 },
   { 工作類型: '外拍一天',   最低影片數: 0 },
-  { 工作類型: '直播日',     最低影片數: 2 },
 ];
 
 const DEFAULT_MEMBERS = ['阿啾', '小芯', '小柯', '小彭', '吻仔魚', '佳玲'];
@@ -335,6 +339,15 @@ function getThisWeekRange() {
 }
 
 // ============================================================
+// 剪輯進度記錄
+// 欄位：日期 | 時間 | 姓名 | LINE_User_ID | 影片標題 | 狀態
+// ============================================================
+
+async function saveEditProgress({ date, time, name, lineUserId, title, status }) {
+  return appendRow('剪輯進度', [date, time, name, lineUserId, title, status]);
+}
+
+// ============================================================
 // 內容指紋（查重）
 // 欄位：日期 | 姓名 | 類型 | 雜湊 | 雲端連結
 // ============================================================
@@ -379,6 +392,7 @@ module.exports = {
   getTodayPublishReports,
   saveMonthlyRecord,
   getMonthlyAnomalies,
+  saveEditProgress,
   saveFingerprint,
   getFingerprints,
   getMonthLogs,

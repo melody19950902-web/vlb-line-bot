@@ -4,11 +4,18 @@
 // 有效工作類型清單
 // ============================================================
 const VALID_DAY_TYPES = [
-  '正常日', '拍攝日', 'Podcast日', '課程日',
-  '外拍半天', '外拍一天', '直播日',
+  // 主要類型
+  '正常日', '跟拍日', '課程日', '大型活動日',
+  // 向後相容（舊格式繼續接受）
+  '拍攝日', 'Podcast日', '直播日', '外拍半天', '外拍一天',
 ];
 
-// 課程日類型（影片數量 0 支為正常）
+// 課程日判斷（含所有角色分組變體，用前綴比對）
+function isCourseDay(dayType) {
+  return typeof dayType === 'string' && dayType.startsWith('課程日');
+}
+
+// 向後相容：集合形式供 analysis.js 的本地備援使用
 const COURSE_DAY_TYPES = new Set(['課程日']);
 
 // ============================================================
@@ -114,10 +121,11 @@ function parseWorkLog(text) {
   if (!typeMatch) return { error: '缺少「今日類型」欄位' };
   const dayType = typeMatch[1].trim();
 
-  if (!VALID_DAY_TYPES.includes(dayType)) {
+  // 課程日（含任意角色分組）或其他有效類型
+  if (!VALID_DAY_TYPES.includes(dayType) && !isCourseDay(dayType)) {
     return {
       error: `「今日類型」填寫有誤（填入：${dayType}）\n` +
-             `可填：正常日、拍攝日、Podcast日、課程日、外拍半天、外拍一天、直播日`,
+             `可填：正常日、跟拍日、課程日、大型活動日等`,
     };
   }
 
@@ -197,9 +205,14 @@ function detectSpecialDayType(text) {
   if (!text) return null;
   const t = text.trim();
 
-  if (t === '外拍半天') return { dayType: '外拍半天', hours: null };
-  if (t === '外拍一天') return { dayType: '外拍一天', hours: null };
+  // 課程日（含任意角色分組，如「課程日（拍攝組）」）
+  if (t.startsWith('課程日')) return { dayType: t, hours: null };
 
+  // 其他主要類型直接關鍵字
+  const DIRECT_KEYWORDS = ['跟拍日', '大型活動日', 'Podcast日', '直播日', '外拍半天', '外拍一天'];
+  if (DIRECT_KEYWORDS.includes(t)) return { dayType: t, hours: null };
+
+  // 舊格式相容
   const courseMatch = t.match(/^課程拍攝\s*(\d+)\s*小時/);
   if (courseMatch) return { dayType: `課程拍攝 ${courseMatch[1]} 小時`, hours: parseInt(courseMatch[1]) };
 
@@ -213,7 +226,7 @@ function detectSpecialDayType(text) {
 }
 
 module.exports = {
-  VALID_DAY_TYPES, COURSE_DAY_TYPES,
+  VALID_DAY_TYPES, COURSE_DAY_TYPES, isCourseDay,
   timeToMinutes, durationMinutes,
   isNonEditingTask, minVideosFromAvailableTime,
   parseWorkLog, detectSpecialDayType,

@@ -176,6 +176,11 @@ function isTaiwanSaturday() {
   return taiwanDate.getDay() === 6;
 }
 
+function isTaiwanSunday() {
+  const taiwanDate = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
+  return taiwanDate.getDay() === 0;
+}
+
 // ============================================================
 // 週六發布查核（只確認有無發布回報，不查工作日誌）
 // ============================================================
@@ -234,6 +239,12 @@ async function sendSaturdaySummary(client) {
 // ============================================================
 
 async function sendDailySummary(client) {
+  // 週日不執行任何彙整
+  if (isTaiwanSunday()) {
+    console.log('🔕 今日為週日，不執行彙整');
+    return;
+  }
+
   // 週六只查發布，不查工作日誌
   if (isTaiwanSaturday()) {
     return sendSaturdaySummary(client);
@@ -388,8 +399,7 @@ async function sendDailySummary(client) {
       adminLines.push(`❓ ${name}｜分析待確認`);
       needsFollowUp.push(name);
     } else if (row[7] === 'normal') {
-      const isSpecialDay = /外拍半天|外拍一天|課程拍攝|直播\s*\d|活動外拍/.test(row[4] || '');
-      const line = isSpecialDay ? `✅ ${name}｜${row[4]}` : `✅ ${name}｜達成工作標準`;
+      const line = `✅ ${name}｜正常`;
       groupLines.push(line);
       adminLines.push(line);
     } else {
@@ -423,7 +433,7 @@ async function sendDailySummary(client) {
   const footer = [
     ``,
     allNormal
-      ? `${allMembers.length} 人全員達成工作標準，辛苦了！`
+      ? `${allMembers.length} 人全員正常，辛苦了！`
       : `${allMembers.length} 人狀態已確認。`,
     ...(needsFollowUp.length > 0 ? [`請 ${needsFollowUp.join('、')} 補充說明。`] : []),
   ];
@@ -445,15 +455,22 @@ async function sendDailySummary(client) {
     await saveMonthlyRecord({ month, name, date: today, anomalyType });
 
     const records = await getMonthlyAnomalies(month, name);
-    const count = records.length;
+    // 只計算 ⚠️異常 或 ❗未回報，排除請假類型
+    const anomalyRecords = records.filter(r => r[3] !== '病假' && r[3] !== '事假' && r[3] !== '休假' && r[3] !== '補休');
+    const count = anomalyRecords.length;
     if (count >= 4) {
+      const dateList = anomalyRecords.map(r => {
+        const emoji = r[3] === '未回報' ? '❗' : '⚠️';
+        return `${emoji} ${r[2]}`;
+      }).join('、');
+
       const alertMsg = [
-        `🚨 月度異常通報`,
-        `小編：${name}`,
-        `本月（${month}）累計異常：${count} 次`,
-        `最新異常：${anomalyType}（${today}）`,
+        `🚨 月度異常警示`,
         ``,
-        `請盡快與 ${name} 確認狀況。`,
+        `${name} 本月已累積 ${count} 次異常`,
+        `（${dateList}）`,
+        ``,
+        `請主管留意並確認狀況。`,
       ].join('\n');
       await notifyAdminLine(client, alertMsg);
     }

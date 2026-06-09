@@ -1,5 +1,9 @@
 'use strict';
-const { getTodayLogs, getWeeklyLogs, getAllMemberNames, getTaiwanDateString, getTaiwanTimeString } = require('./sheets');
+const {
+  getTodayLogs, getWeeklyLogs, getAllMemberNames,
+  getTaiwanDateString, getTaiwanTimeString,
+  getMonthlyAnomalies, getTaiwanMonthString,
+} = require('./sheets');
 
 // ============================================================
 // 說明文字
@@ -9,6 +13,7 @@ const HELP_TEXT = `📋 VLB 設計部工作查核系統
 【主管查詢指令】
 今日狀況　→ 所有人今日回報一覽
 週報　　　→ 本週每人工作摘要
+月報　　　→ 本月每人異常累計
 @姓名 狀況 → 查詢特定小編
 　（例：@小芯 狀況）
 說明　　　→ 顯示此說明
@@ -55,6 +60,7 @@ function detectCommand(text) {
   const t = text.trim();
   if (t === '今日狀況') return { type: 'today' };
   if (t === '週報')     return { type: 'weekly' };
+  if (t === '月報')     return { type: 'monthly' };
   if (t === '說明' || t === 'help') return { type: 'help' };
   if (t === '我的ID' || t === 'myid') return { type: 'myid' };
   const personMatch = t.match(/^@(.+?)\s*狀況$/);
@@ -73,9 +79,10 @@ async function handleCommand(text, userId) {
     return '🔒 此指令僅限管理員使用。\n輸入「說明」查看回報格式。';
   }
 
-  if (cmd.type === 'today')  return formatTodayStatus();
-  if (cmd.type === 'weekly') return formatWeeklyReport();
-  if (cmd.type === 'person') return formatPersonStatus(cmd.name);
+  if (cmd.type === 'today')   return formatTodayStatus();
+  if (cmd.type === 'weekly')  return formatWeeklyReport();
+  if (cmd.type === 'monthly') return formatMonthlyReport();
+  if (cmd.type === 'person')  return formatPersonStatus(cmd.name);
 
   return null;
 }
@@ -158,6 +165,33 @@ async function formatWeeklyReport() {
     lines.push(`${name}：${s.days}天｜${s.videos}支影片｜${statusPart}`);
   }
 
+  return lines.join('\n');
+}
+
+// ============================================================
+// 月報：本月每人異常累計次數
+// ============================================================
+
+async function formatMonthlyReport() {
+  const allMembers = await getAllMemberNames();
+  const month = getTaiwanMonthString();
+  const lines = [`📊 VLB設計部 ${month} 月度異常統計\n`];
+
+  for (const name of allMembers) {
+    const records = await getMonthlyAnomalies(month, name);
+    const anomalies = records.filter(r => r[3] !== '病假' && r[3] !== '事假' && r[3] !== '休假' && r[3] !== '補休');
+    if (anomalies.length === 0) {
+      lines.push(`✅ ${name}：本月無異常`);
+    } else {
+      const dateList = anomalies.map(r => {
+        const emoji = r[3] === '未回報' ? '❗' : '⚠️';
+        return `${emoji}${r[2]}`;
+      }).join('、');
+      lines.push(`⚠️ ${name}：${anomalies.length} 次（${dateList}）`);
+    }
+  }
+
+  lines.push(`\n統計月份：${month}`);
   return lines.join('\n');
 }
 

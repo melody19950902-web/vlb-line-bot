@@ -1,6 +1,6 @@
 'use strict';
 const { parseWorkLog, detectSpecialDayType } = require('./analyzer');
-const { saveWorkLog, savePublishReport, saveLeaveRecord, getMemberName,
+const { saveWorkLog, savePublishReport, saveLeaveRecord, saveEditProgress, getMemberName,
         getTaiwanDateString, getTaiwanTimeString }           = require('./sheets');
 
 const { handleCommand }                                      = require('./commands');
@@ -33,9 +33,17 @@ function isWorkLog(text) {
     && text.includes('影片數量'));
 }
 
-// 發布回報（單獨傳入的 "已發布｜平台｜帳號" 訊息）
+// 發布回報（新格式：已發布｜平台｜帳號；舊格式：含「發布完成」字樣）
 function isPublishReport(text) {
-  return !!(text && /^已發布[｜|]/.test(text.trim()));
+  if (!text) return false;
+  const t = text.trim();
+  return /^已發布[｜|]/.test(t) || t.includes('發布完成');
+}
+
+// 剪輯進度上傳（格式：剪輯進度｜影片標題｜狀態）
+function isEditProgress(text) {
+  if (!text) return false;
+  return /^剪輯進度[｜|]/.test(text.trim());
 }
 
 // 請假 / 補休（靜默記錄，不回覆）
@@ -137,7 +145,25 @@ async function processPublishReport(text, userId, client, source) {
   const time       = getTaiwanTimeString();
 
   await savePublishReport({ date, time, name: memberName, lineUserId: userId, rawText: text });
-  console.log(`📢 發布回報記錄：${memberName} ${text}`);
+  console.log(`📢 [發布回報] ${memberName} | ${text}`);
+  return null; // 靜默接收
+}
+
+// ============================================================
+// 剪輯進度處理（靜默儲存至剪輯進度記錄）
+// ============================================================
+
+async function processEditProgress(text, userId, client, source) {
+  const memberName = await getMemberDisplayName(userId, client, source);
+  const date       = getTaiwanDateString();
+  const time       = getTaiwanTimeString();
+
+  const parts = text.split(/[｜|]/);
+  const title  = parts[1] ? parts[1].trim() : text;
+  const status = parts[2] ? parts[2].trim() : '未知';
+
+  await saveEditProgress({ date, time, name: memberName, lineUserId: userId, title, status });
+  console.log(`✂️ [剪輯進度] ${memberName} | ${title} | ${status}`);
   return null; // 靜默接收
 }
 
@@ -221,6 +247,11 @@ async function handleEvent(event, client) {
       await processPublishReport(text, userId, client, source);
       return; // 不回覆
     }
+    // 剪輯進度（靜默記錄，不回覆）
+    else if (isEditProgress(text)) {
+      await processEditProgress(text, userId, client, source);
+      return; // 不回覆
+    }
     // 完整工作日誌
     else if (isWorkLog(text)) {
       replyText = await processWorkLog(text, userId, client, source);
@@ -246,4 +277,4 @@ async function handleEvent(event, client) {
   });
 }
 
-module.exports = { handleEvent, isWorkLog, isPublishReport, parseLeaveRequest };
+module.exports = { handleEvent, isWorkLog, isPublishReport, isEditProgress, parseLeaveRequest };

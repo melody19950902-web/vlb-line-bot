@@ -1,7 +1,7 @@
 'use strict';
 const Anthropic = require('@anthropic-ai/sdk');
 const { getSopSettings, getTaskTimeRules, getDayTypeRules } = require('./sheets');
-const { COURSE_DAY_TYPES, isNonEditingTask, minVideosFromAvailableTime } = require('./parser');
+const { isCourseDay, isNonEditingTask, minVideosFromAvailableTime } = require('./parser');
 
 // ============================================================
 // 超時描述輔助（不顯示分鐘數）
@@ -107,10 +107,11 @@ async function buildSystemPrompt() {
 ${dayTypeText}
 
 【課程日特別說明】
-課程日：
+課程日系列（「課程日」、「課程日（拍攝組）」、「課程日（拍照組）」、「課程日（限動組）」、「課程日（行政支援）」，以及任何以「課程日」開頭的類型）：
+- 不強制填寫角色分組，有無括號都合法
 - 影片數量 0 支為完全正常，不標記異常
-- 主要任務是課程拍攝與現場記錄，不需常規剪輯或輪播產出
-- 不得因影片數量為 0 或無輪播記錄而標記
+- 主要任務是現場拍攝、記錄、拍照、限動或行政支援，不需常規剪輯或輪播產出
+- 不得因影片數量為 0 或無輪播記錄而標記任何異常
 
 【拍攝日特別說明】
 拍攝日：
@@ -230,7 +231,8 @@ async function localFallbackAnalysis(parsedLog) {
 
   const minHours = parseFloat(sopSettings['最低工時_小時'] || '6');
 
-  if (COURSE_DAY_TYPES.has(parsedLog.dayType)) {
+  // 課程日（含任意角色分組）：影片數量 0 支視為正常
+  if (isCourseDay(parsedLog.dayType)) {
     return {
       status: 'normal', video_count_ok: true, time_log_ok: true,
       total_hours: parsedLog.effectiveTotalHours, anomalies: [],

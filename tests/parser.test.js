@@ -143,6 +143,31 @@ describe('parseWorkLog', () => {
     expect(result.dayType).toBe('課程日');
     expect(result.videoCount).toBe(0);
   });
+
+  test('課程日（拍攝組）0 支不報錯', () => {
+    const result = parseWorkLog('今日類型：課程日（拍攝組）\n影片數量：0');
+    expect(result.error).toBeUndefined();
+    expect(result.dayType).toBe('課程日（拍攝組）');
+    expect(result.videoCount).toBe(0);
+  });
+
+  test('課程日（拍照組）合法', () => {
+    const result = parseWorkLog('今日類型：課程日（拍照組）\n影片數量：0');
+    expect(result.error).toBeUndefined();
+    expect(result.dayType).toBe('課程日（拍照組）');
+  });
+
+  test('課程日（限動組）合法', () => {
+    const result = parseWorkLog('今日類型：課程日（限動組）\n影片數量：0');
+    expect(result.error).toBeUndefined();
+    expect(result.dayType).toBe('課程日（限動組）');
+  });
+
+  test('課程日（行政支援）合法', () => {
+    const result = parseWorkLog('今日類型：課程日（行政支援）\n影片數量：0');
+    expect(result.error).toBeUndefined();
+    expect(result.dayType).toBe('課程日（行政支援）');
+  });
 });
 
 // ============================================================
@@ -173,6 +198,18 @@ describe('detectSpecialDayType', () => {
     const result = detectSpecialDayType('直播 2 小時');
     expect(result).not.toBeNull();
     expect(result.hours).toBe(2);
+  });
+
+  test('課程日（拍攝組）簡短宣告', () => {
+    const result = detectSpecialDayType('課程日（拍攝組）');
+    expect(result).not.toBeNull();
+    expect(result.dayType).toBe('課程日（拍攝組）');
+  });
+
+  test('課程日（行政支援）簡短宣告', () => {
+    const result = detectSpecialDayType('課程日（行政支援）');
+    expect(result).not.toBeNull();
+    expect(result.dayType).toBe('課程日（行政支援）');
   });
 
   test('無法識別回傳 null', () => {
