@@ -1,6 +1,7 @@
 'use strict';
 const { parseWorkLog, detectSpecialDayType } = require('./analyzer');
 const { saveWorkLog, savePublishReport, saveLeaveRecord, saveEditProgress, getMemberName,
+        getLeaveRecordForUserOnDate, deleteLeaveRecordForUserOnDate,
         getTaiwanDateString, getTaiwanTimeString }           = require('./sheets');
 
 const { handleCommand }                                      = require('./commands');
@@ -19,8 +20,8 @@ const FORMAT_ERROR_HINT = `
 備註：（選填）
 
 工作類型可填:
-正常日、拍攝日、Podcast日、課程日
-外拍半天、外拍一天、直播日`.trim();
+正常日、跟拍日、課程日、大型活動日（拍照組／限動組／剪輯組）
+Podcast日、直播日、外拍半天、外拍一天`.trim();
 
 // ============================================================
 // 訊息類型偵測
@@ -46,23 +47,39 @@ function isEditProgress(text) {
   return /^剪輯進度[｜|]/.test(text.trim());
 }
 
-// 請假 / 補休（靜默記錄，不回覆）
-// 今日格式：今日病假、今日事假、今日請假
-// 明天格式：明天請假、明天休假、明天補休、明天補休半天、明天早上/下午補休半天、明天補休 X 小時
+// 請假 / 補休（記錄後回覆確認；重複則提醒已記錄）
+// 當天僅 病假／事假；明日 事假／特休／休假／補休
+// 「明天／明日」「今日／今天」四種講法皆等價；通用「請假」回傳 vague，由 processLeaveRequest 反問假別
 function parseLeaveRequest(text) {
   if (!text) return null;
-  const t = text.trim();
+  // 開頭統一正規化：明日→明天、今天→今日
+  const t = text.trim().replace(/^明日/, '明天').replace(/^今天/, '今日');
+  // 當天：只允許病假與臨時事假
   if (t === '今日病假') return { leaveType: '病假', isToday: true };
   if (t === '今日事假') return { leaveType: '事假', isToday: true };
-  if (t === '今日請假') return { leaveType: '請假', isToday: true };
-  if (t === '明天請假' || t === '明天請假一天') return { leaveType: '請假', isToday: false };
+  if (t === '今日請假') return { vague: true, isToday: true };
+  // 明日（前一天預告）
+  if (t === '明天事假') return { leaveType: '事假', isToday: false };
+  if (t === '明天特休') return { leaveType: '特休', isToday: false };
   if (t === '明天休假' || t === '明天休假一天') return { leaveType: '休假', isToday: false };
+  if (t === '明天請假' || t === '明天請假一天') return { vague: true, isToday: false };
+  // 補休系列
   if (t === '明天補休') return { leaveType: '補休', isToday: false };
   if (t === '明天補休半天') return { leaveType: '補休', hours: 4, isToday: false };
   if (t === '明天早上補休半天') return { leaveType: '補休', hours: 4, session: '早上', isToday: false };
   if (t === '明天下午補休半天') return { leaveType: '補休', hours: 4, session: '下午', isToday: false };
   const hoursMatch = t.match(/^明天補休\s*(\d+(?:\.\d+)?)\s*小時$/);
   if (hoursMatch) return { leaveType: '補休', hours: parseFloat(hoursMatch[1]), isToday: false };
+  return null;
+}
+
+// 取消請假指令解析
+// 支援：取消今日／取消今天／取消明天／取消明日 + 假別（可選）
+function parseCancelRequest(text) {
+  if (!text) return null;
+  const t = text.trim();
+  if (/^取消(今日|今天)(請假|病假|事假|特休|休假|補休)?$/.test(t)) return { isToday: true };
+  if (/^取消(明天|明日)(請假|病假|事假|特休|休假|補休)?$/.test(t)) return { isToday: false };
   return null;
 }
 
@@ -172,10 +189,14 @@ async function processEditProgress(text, userId, client, source) {
 }
 
 // ============================================================
-// 請假處理（靜默記錄，計算隔天日期）
+// 請假處理（記錄後回覆確認；重複則提醒已記錄；寫入失敗則提醒重試）
 // ============================================================
 
 async function processLeaveRequest(text, userId, client, source, leaveInfo) {
+  if (leaveInfo.vague) {
+    return '請問你要請哪一種假？\n・當天可請：今日病假、今日事假\n・前一天預告：明日事假、明日特休、明日休假、明日補休\n請改傳明確的假別，謝謝。';
+  }
+
   const memberName = await getMemberDisplayName(userId, client, source);
 
   // 當天臨時請假用今天，隔天預告請假用明天
@@ -184,17 +205,48 @@ async function processLeaveRequest(text, userId, client, source, leaveInfo) {
   const leaveDate  = getTaiwanDateString(targetDate);
   const submitTime = getTaiwanTimeString();
 
-  await saveLeaveRecord({
-    leaveDate,
-    submitTime,
-    name:      memberName,
-    lineUserId: userId,
-    leaveType: leaveInfo.leaveType,
-    hours:     leaveInfo.hours,
-  });
+  // 同一人同一天已有請假記錄 → 直接回覆，不重複寫入
+  const existing = await getLeaveRecordForUserOnDate(userId, leaveDate);
+  if (existing) {
+    const dayLabel = leaveInfo.isToday ? '今日' : '明日';
+    const cancelWord = leaveInfo.isToday ? '今日' : '明天';
+    console.log(`📋 [請假記錄] 重複偵測 | 小編：${memberName} | 請假日期：${leaveDate} | 已存在類型：${existing.leaveType}`);
+    return `📌 你${dayLabel}（${leaveDate}）的請假已經記錄過了（類型：${existing.leaveType}）。\n如需更改，請先傳「取消${cancelWord}請假」再重新傳一次。`;
+  }
 
-  // 靜默記錄，不回覆任何訊息
-  console.log(`📋 [請假記錄] 寫入完成 | 小編：${memberName} | 請假日期：${leaveDate} | 類型：${leaveInfo.leaveType} | 提交時間：${submitTime}`);
+  const ok = await saveLeaveRecord({
+    leaveDate, submitTime,
+    name: memberName, lineUserId: userId,
+    leaveType: leaveInfo.leaveType, hours: leaveInfo.hours,
+  });
+  console.log(`📋 [請假記錄] 寫入${ok ? '完成' : '失敗'} | 小編：${memberName} | 請假日期：${leaveDate} | 類型：${leaveInfo.leaveType} | 提交時間：${submitTime}`);
+  if (!ok) {
+    return '⚠️ 請假記錄寫入失敗，請稍後再傳一次；若持續失敗，請通知主管手動登記。';
+  }
+  const dayLabel = leaveInfo.isToday ? '今日' : '明日';
+  const cancelWord = leaveInfo.isToday ? '今日' : '明天';
+  let detail = leaveInfo.leaveType;
+  if (leaveInfo.session) detail += `（${leaveInfo.session}）`;
+  if (leaveInfo.hours)   detail += ` ${leaveInfo.hours} 小時`;
+  return `✅ 已收到並記錄你的請假\n👤 ${memberName}\n📅 ${leaveDate}（${dayLabel}）\n📌 類型：${detail}\n\n如需取消，請傳「取消${cancelWord}請假」；如需修改，取消後再重新傳一次即可。`;
+}
+
+// ============================================================
+// 取消請假處理（刪除該人當日／隔日的請假記錄）
+// ============================================================
+
+async function processCancelRequest(text, userId, client, source, cancelInfo) {
+  const memberName = await getMemberDisplayName(userId, client, source);
+  const targetDate = new Date();
+  if (!cancelInfo.isToday) targetDate.setDate(targetDate.getDate() + 1);
+  const leaveDate = getTaiwanDateString(targetDate);
+  const dayLabel  = cancelInfo.isToday ? '今日' : '明日';
+  const removed = await deleteLeaveRecordForUserOnDate(userId, leaveDate);
+  if (!removed) {
+    return `你${dayLabel}（${leaveDate}）沒有找到可取消的請假記錄。`;
+  }
+  console.log(`📋 [請假記錄] 取消 | 小編：${memberName} | 日期：${leaveDate} | 原類型：${removed.leaveType}`);
+  return `✅ 已取消你${dayLabel}（${leaveDate}）的請假（原類型：${removed.leaveType}）。\n如需重新請假，直接再傳一次即可。`;
 }
 
 // ============================================================
@@ -241,10 +293,13 @@ async function handleEvent(event, client) {
     if (cmdReply) {
       replyText = cmdReply;
     }
-    // 請假 / 補休（靜默記錄，不回覆）
+    // 取消請假（先於請假解析，避免關鍵字重疊）
+    else if (parseCancelRequest(text)) {
+      replyText = await processCancelRequest(text, userId, client, source, parseCancelRequest(text));
+    }
+    // 請假 / 補休（記錄後回覆確認；重複則提醒已記錄）
     else if (parseLeaveRequest(text)) {
-      await processLeaveRequest(text, userId, client, source, parseLeaveRequest(text));
-      return; // 不回覆
+      replyText = await processLeaveRequest(text, userId, client, source, parseLeaveRequest(text));
     }
     // 發布回報（靜默記錄，不回覆）
     else if (isPublishReport(text)) {

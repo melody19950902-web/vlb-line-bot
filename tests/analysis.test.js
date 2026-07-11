@@ -79,14 +79,15 @@ describe('localFallbackAnalysis', () => {
     expect(result.anomalies.some(a => a.includes('影片') || a.includes('0'))).toBe(true);
   });
 
-  test('正常日 0 支 有備註 → normal（備註說明充分）', async () => {
+  test('正常日 0 支 有備註 → alert（備註不再作為豁免理由）', async () => {
     const parsedLog = {
       dayType: '正常日', videoCount: 0,
       timeEntries: [], effectiveTotalHours: 7, effectiveTotalMinutes: 420,
       notes: '今日全天拍攝，影片後天剪輯',
     };
     const result = await localFallbackAnalysis(parsedLog);
-    expect(result.status).toBe('normal');
+    expect(result.status).toBe('alert');
+    expect(result.anomalies.some(a => a.includes('影片'))).toBe(true);
   });
 
   test('工時不足（有時間記錄）→ warning', async () => {
@@ -100,7 +101,7 @@ describe('localFallbackAnalysis', () => {
     expect(result.anomalies.some(a => a.includes('時數'))).toBe(true);
   });
 
-  test('工時不足但有備註 → normal', async () => {
+  test('工時不足但有備註 → warning（備註不再豁免時數）', async () => {
     const parsedLog = {
       dayType: '正常日', videoCount: 2,
       timeEntries: [{ task: '剪輯', effectiveMins: 180, batchCount: null, startTime: '09:00', endTime: '12:00', duration: 180 }],
@@ -108,7 +109,8 @@ describe('localFallbackAnalysis', () => {
       notes: '下午身體不適提早離開',
     };
     const result = await localFallbackAnalysis(parsedLog);
-    expect(result.status).toBe('normal');
+    expect(result.status).toBe('warning');
+    expect(result.anomalies.some(a => a.includes('時數'))).toBe(true);
   });
 
   test('批量超時（per_video_mins > 120）→ warning', async () => {

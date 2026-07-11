@@ -78,11 +78,33 @@ describe('isPublishReport', () => {
 // ============================================================
 
 describe('parseLeaveRequest', () => {
-  // --- 明天系列（原有功能）---
-  test('明天請假', () => {
+  // --- 明天系列 ---
+  // 通用「明天請假」現為 vague，需反問假別
+  test('明天請假 → vague（未指定假別）', () => {
     const r = parseLeaveRequest('明天請假');
     expect(r).not.toBeNull();
-    expect(r.leaveType).toBe('請假');
+    expect(r.vague).toBe(true);
+    expect(r.isToday).toBe(false);
+  });
+
+  test('明天特休', () => {
+    const r = parseLeaveRequest('明天特休');
+    expect(r).not.toBeNull();
+    expect(r.leaveType).toBe('特休');
+    expect(r.isToday).toBe(false);
+  });
+
+  test('明天事假（前一天預告）', () => {
+    const r = parseLeaveRequest('明天事假');
+    expect(r).not.toBeNull();
+    expect(r.leaveType).toBe('事假');
+    expect(r.isToday).toBe(false);
+  });
+
+  test('明日特休 = 明天特休（明日視同明天）', () => {
+    const r = parseLeaveRequest('明日特休');
+    expect(r).not.toBeNull();
+    expect(r.leaveType).toBe('特休');
     expect(r.isToday).toBe(false);
   });
 
@@ -136,10 +158,17 @@ describe('parseLeaveRequest', () => {
     expect(r.isToday).toBe(true);
   });
 
-  test('今日請假', () => {
+  test('今日請假 → vague（未指定假別）', () => {
     const r = parseLeaveRequest('今日請假');
     expect(r).not.toBeNull();
-    expect(r.leaveType).toBe('請假');
+    expect(r.vague).toBe(true);
+    expect(r.isToday).toBe(true);
+  });
+
+  test('今天病假 = 今日病假（今天視同今日）', () => {
+    const r = parseLeaveRequest('今天病假');
+    expect(r).not.toBeNull();
+    expect(r.leaveType).toBe('病假');
     expect(r.isToday).toBe(true);
   });
 

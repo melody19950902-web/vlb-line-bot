@@ -68,7 +68,7 @@ setInterval(async () => {
     const now = getTaiwanTimeString();    // "HH:MM"
     const today = new Date().toLocaleDateString('zh-TW', { timeZone: 'Asia/Taipei' });
 
-    if (now === '22:30' && lastSummaryDate !== today) {
+    if (now >= '22:30' && lastSummaryDate !== today) {
       lastSummaryDate = today;
       console.log(`📊 發送每日彙整：${today}`);
       await sendDailySummary(client);

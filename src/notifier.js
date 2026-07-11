@@ -7,7 +7,7 @@ const {
   saveMonthlyRecord, getMonthlyAnomalies, getTaiwanMonthString,
   getSopSettings, getMonthLogs, saveMonthlyVideoStats,
 } = require('./sheets');
-const { parseWorkLog, analyzeWorkLog } = require('./analyzer');
+const { parseWorkLog, analyzeWorkLog, applyCompLeaveAdjustment } = require('./analyzer');
 
 // ============================================================
 // LINE 推播通知
@@ -126,6 +126,13 @@ async function sendAnomalyAlert(client, { memberName, dayType, anomalies, date, 
 
 async function sendMonthlyVideoReport(client, month, allMembers) {
   try {
+    // 防重複：若「月度記錄」該月已存在「影片統計」列，代表本月已發過
+    const existing = await getMonthlyAnomalies(month);
+    if (existing.some(r => r[2] === '影片統計')) {
+      console.log(`📊 月度影片統計已存在，略過重複發送：${month}`);
+      return;
+    }
+
     const logs = await getMonthLogs(month);
 
     // 每人每天取最後一筆，再加總
@@ -239,15 +246,29 @@ async function sendSaturdaySummary(client) {
 // ============================================================
 
 async function sendDailySummary(client) {
-  // 週日不執行任何彙整
+  // 是否為台灣時區月底（明天進入下個月）
+  const taiwanNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
+  const twTomorrow = new Date(taiwanNow); twTomorrow.setDate(twTomorrow.getDate() + 1);
+  const isMonthEnd = twTomorrow.getMonth() !== taiwanNow.getMonth();
+
+  // 週日不執行任何彙整；月底仍發影片統計
   if (isTaiwanSunday()) {
     console.log('🔕 今日為週日，不執行彙整');
+    if (isMonthEnd) {
+      const members = await getAllMemberNames();
+      await sendMonthlyVideoReport(client, getTaiwanMonthString(), members);
+    }
     return;
   }
 
-  // 週六只查發布，不查工作日誌
+  // 週六只查發布，不查工作日誌；月底仍發影片統計
   if (isTaiwanSaturday()) {
-    return sendSaturdaySummary(client);
+    await sendSaturdaySummary(client);
+    if (isMonthEnd) {
+      const members = await getAllMemberNames();
+      await sendMonthlyVideoReport(client, getTaiwanMonthString(), members);
+    }
+    return;
   }
 
   const today = getTaiwanDateString();
@@ -263,8 +284,19 @@ async function sendDailySummary(client) {
 
   console.log(`📂 [請假記錄] 今日(${today})共 ${leaveRecords.length} 筆請假記錄：${leaveRecords.map(r => r[2]).join('、') || '無'}`);
 
+  // 請假對照表：name → { type, hours }
+  const leaveMap = new Map();
+  for (const r of leaveRecords) {
+    if (r[2]) leaveMap.set(r[2], { type: r[4] || '請假', hours: parseFloat(r[5]) || 0 });
+  }
+  // 補休時數：只有補休且有指定時數（如半天 4 小時）才回傳 > 0；整天補休回 0
+  const compHoursOf = (name) => {
+    const lv = leaveMap.get(name);
+    return lv && lv.type === '補休' && lv.hours > 0 ? lv.hours : 0;
+  };
+
   const minHours = parseFloat(sopSettings['最低工時_小時'] || '6');
-  const hoursDetailMap = new Map(); // name → { actual: 實際時數 }
+  const hoursDetailMap = new Map(); // name → { actual: 實際時數, min: 該人套用的最低工時 }
 
   // 每人取最後一筆回報
   const latestByName = new Map();
@@ -311,25 +343,32 @@ async function sendDailySummary(client) {
       }
 
       const analysis = await analyzeWorkLog(parsedLog, name);
+      const comp = compHoursOf(name);
+      const finalAnalysis = comp > 0
+        ? applyCompLeaveAdjustment(analysis, parsedLog, { compHours: comp, minHours })
+        : analysis;
       const time = getTaiwanTimeString();
 
-      if (analysis.anomalies.includes('時數未達標準')) {
-        hoursDetailMap.set(name, { actual: parsedLog.effectiveTotalHours });
+      if (finalAnalysis.anomalies.includes('時數未達標準')) {
+        hoursDetailMap.set(name, {
+          actual: parsedLog.effectiveTotalHours,
+          min: comp > 0 ? Math.max(0, minHours - comp) : minHours,
+        });
       }
 
       await saveWorkLog({
         date: today, time, name, lineUserId: row[3],
         dayType: parsedLog.dayType, videoCount: parsedLog.videoCount,
-        timeLog: mergedTimeLog, status: analysis.status,
-        anomalies: analysis.anomalies, notes: parsedLog.notes || '',
+        timeLog: mergedTimeLog, status: finalAnalysis.status,
+        anomalies: finalAnalysis.anomalies, notes: parsedLog.notes || '',
       });
 
       // 更新 latestByName，讓下方彙整使用最終結果
       latestByName.set(name, [
         today, time, name, row[3],
         parsedLog.dayType, String(parsedLog.videoCount),
-        mergedTimeLog, analysis.status,
-        analysis.anomalies.join('；'), parsedLog.notes || '',
+        mergedTimeLog, finalAnalysis.status,
+        finalAnalysis.anomalies.join('；'), parsedLog.notes || '',
       ]);
     } catch (err) {
       console.error(`22:30 分析 ${name} 失敗：`, err.message);
@@ -355,64 +394,60 @@ async function sendDailySummary(client) {
     }
   }
 
-  // 請假類型對照表 { name → leaveType }
-  const leaveTypeMap = new Map();
-  for (const r of leaveRecords) {
-    if (r[2]) leaveTypeMap.set(r[2], r[4] || '請假');
-  }
-
   const header = [`📊 VLB 今日工作回報 ${today}`, ``];
   const groupLines = [...header];
   const adminLines = [...header];
 
   const needsFollowUp = [];
   const monthlyToRecord = [];
+  const notPublishedToday = [];
 
   for (const name of allMembers) {
-    console.log(`🔍 [22:30查核] ${name} | 請假=${leaveTypeMap.get(name) || '無'} | 工作日誌=${latestByName.has(name) ? '有' : '無'}`);
-    const leaveType = leaveTypeMap.get(name);
+    const leave = leaveMap.get(name);
+    const comp = compHoursOf(name);
+    console.log(`🔍 [22:30查核] ${name} | 請假=${leave ? leave.type : '無'}${comp > 0 ? `(補休${comp}小時)` : ''} | 工作日誌=${latestByName.has(name) ? '有' : '無'}`);
 
-    if (leaveType === '病假') {
-      groupLines.push(`🏥 ${name}｜病假`);
-      adminLines.push(`🏥 ${name}｜病假`);
+    // 整天請假（含整天補休）／其他假別 → 跳過工作日誌顯示（不查發布）
+    if (leave && comp === 0) {
+      if (leave.type === '病假') { groupLines.push(`🏥 ${name}｜病假`); adminLines.push(`🏥 ${name}｜病假`); continue; }
+      if (leave.type === '事假') { groupLines.push(`📋 ${name}｜事假`); adminLines.push(`📋 ${name}｜事假`); continue; }
+      groupLines.push(`🏖️ ${name}｜${leave.type}（已請假）`);
+      adminLines.push(`🏖️ ${name}｜${leave.type}（已請假）`);
       continue;
     }
-    if (leaveType === '事假') {
-      groupLines.push(`📋 ${name}｜事假`);
-      adminLines.push(`📋 ${name}｜事假`);
-      continue;
-    }
-    if (leaveType) {
-      groupLines.push(`🏖️ ${name}｜休假（已請假）`);
-      adminLines.push(`🏖️ ${name}｜休假（已請假）`);
-      continue;
-    }
+    // 補休半天：改走工作日誌顯示，並標註補休時數
+    const compNote = comp > 0 ? `（補休${comp}小時）` : '';
+    // 平日發布查核：只顯示與點名，不寫入月度記錄、不改 status
+    const published = (publishReportMap.get(name) || []).length > 0;
+    const pubNote = published ? '' : '｜📢未發布';
+    if (!published) notPublishedToday.push(name);
 
     const row = latestByName.get(name);
     if (!row) {
-      groupLines.push(`❗ ${name}｜未回報且未請假`);
-      adminLines.push(`❗ ${name}｜未回報且未請假`);
+      groupLines.push(`❗ ${name}｜未回報且未請假${compNote}${pubNote}`);
+      adminLines.push(`❗ ${name}｜未回報且未請假${compNote}${pubNote}`);
       monthlyToRecord.push({ name, anomalyType: '未回報' });
       needsFollowUp.push(name);
     } else if (row[7] === 'pending') {
-      groupLines.push(`❓ ${name}｜分析待確認`);
-      adminLines.push(`❓ ${name}｜分析待確認`);
+      groupLines.push(`❓ ${name}｜分析待確認${compNote}${pubNote}`);
+      adminLines.push(`❓ ${name}｜分析待確認${compNote}${pubNote}`);
       needsFollowUp.push(name);
     } else if (row[7] === 'normal') {
-      const line = `✅ ${name}｜正常`;
+      const line = `✅ ${name}｜正常${compNote}${pubNote}`;
       groupLines.push(line);
       adminLines.push(line);
     } else {
       const allAnomalies = (row[8] || '').split('；').filter(Boolean);
       const reason = allAnomalies[0];
       const emoji = row[7] === 'alert' ? '🚨' : '⚠️';
-      groupLines.push(`${emoji} ${name}｜${reason}`);
+      groupLines.push(`${emoji} ${name}｜${reason}${compNote}${pubNote}`);
 
-      // 主管版：若有時數異常，附上實際時數與不足量
+      // 主管版：若有時數異常，附上實際時數與不足量（用該人套用的最低工時）
       const hoursDetail = hoursDetailMap.get(name);
       let adminReason = reason;
       if (hoursDetail) {
-        const shortfall = Math.round((minHours - hoursDetail.actual) * 10) / 10;
+        const baseMin = hoursDetail.min != null ? hoursDetail.min : minHours;
+        const shortfall = Math.round((baseMin - hoursDetail.actual) * 10) / 10;
         const hoursNote = `時數未達標準（實際 ${hoursDetail.actual} 小時，不足 ${shortfall} 小時）`;
         if (reason === '時數未達標準') {
           adminReason = hoursNote;
@@ -420,7 +455,7 @@ async function sendDailySummary(client) {
           adminReason = `${reason}（另：${hoursNote}）`;
         }
       }
-      adminLines.push(`${emoji} ${name}｜${adminReason}`);
+      adminLines.push(`${emoji} ${name}｜${adminReason}${compNote}${pubNote}`);
 
       for (const anomalyType of allAnomalies) {
         monthlyToRecord.push({ name, anomalyType });
@@ -436,6 +471,7 @@ async function sendDailySummary(client) {
       ? `${allMembers.length} 人全員正常，辛苦了！`
       : `${allMembers.length} 人狀態已確認。`,
     ...(needsFollowUp.length > 0 ? [`請 ${needsFollowUp.join('、')} 補充說明。`] : []),
+    ...(notPublishedToday.length > 0 ? [`📢 今日尚未回報發布：${notPublishedToday.join('、')}，請補「已發布｜平台｜帳號」。`] : []),
   ];
   groupLines.push(...footer);
   adminLines.push(...footer);
@@ -455,8 +491,9 @@ async function sendDailySummary(client) {
     await saveMonthlyRecord({ month, name, date: today, anomalyType });
 
     const records = await getMonthlyAnomalies(month, name);
-    // 只計算 ⚠️異常 或 ❗未回報，排除請假類型
-    const anomalyRecords = records.filter(r => r[3] !== '病假' && r[3] !== '事假' && r[3] !== '休假' && r[3] !== '補休');
+    // 只計算 ⚠️異常 或 ❗未回報，排除請假類型與影片統計列
+    const anomalyRecords = records.filter(r =>
+      r[2] !== '影片統計' && !['病假','事假','特休','休假','補休'].includes(r[3]));
     const count = anomalyRecords.length;
     if (count >= 4) {
       const dateList = anomalyRecords.map(r => {
@@ -476,13 +513,8 @@ async function sendDailySummary(client) {
     }
   }));
 
-  // 月底：發送當月影片統計
-  const todayDate = new Date();
-  const tomorrowDate = new Date(todayDate);
-  tomorrowDate.setDate(tomorrowDate.getDate() + 1);
-  if (tomorrowDate.getMonth() !== todayDate.getMonth()) {
-    await sendMonthlyVideoReport(client, month, allMembers);
-  }
+  // 月底：發送當月影片統計（isMonthEnd 已於函式開頭以台灣時區計算）
+  if (isMonthEnd) await sendMonthlyVideoReport(client, month, allMembers);
 }
 
 module.exports = { notifyAdminLine, notifyGroup, sendEmailAlert, sendAnomalyAlert, sendDailySummary, sendMonthlyVideoReport };

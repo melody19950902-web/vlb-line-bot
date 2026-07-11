@@ -49,17 +49,20 @@ const DEFAULT_TASK_TIME_RULES = [
 ];
 
 const DEFAULT_DAY_TYPE_RULES = [
-  // 主要類型
-  { 工作類型: '正常日',     最低影片數: 3 },
-  { 工作類型: '跟拍日',     最低影片數: 0 },
-  { 工作類型: '課程日',     最低影片數: 0 },
-  { 工作類型: '大型活動日', 最低影片數: 1 },
-  // 向後相容
-  { 工作類型: '拍攝日',     最低影片數: 1 },
-  { 工作類型: 'Podcast日', 最低影片數: 1 },
-  { 工作類型: '直播日',     最低影片數: 1 },
-  { 工作類型: '外拍半天',   最低影片數: 1 },
-  { 工作類型: '外拍一天',   最低影片數: 0 },
+  // 正式 11 列
+  { 工作類型: '正常日',               最低影片數: 3 },
+  { 工作類型: '跟拍日',               最低影片數: 0 },
+  { 工作類型: '課程日',               最低影片數: 0 },
+  { 工作類型: '大型活動日（拍照組）', 最低影片數: 0 },
+  { 工作類型: '大型活動日（限動組）', 最低影片數: 0 },
+  { 工作類型: '大型活動日（剪輯組）', 最低影片數: 1 },
+  { 工作類型: '拍攝日',               最低影片數: 1 },
+  { 工作類型: 'Podcast日',            最低影片數: 1 },
+  { 工作類型: '直播日',               最低影片數: 1 },
+  { 工作類型: '外拍半天',             最低影片數: 1 },
+  { 工作類型: '外拍一天',             最低影片數: 0 },
+  // 未分組大型活動日 fallback（用戶未指定角色組時）
+  { 工作類型: '大型活動日',           最低影片數: 1 },
 ];
 
 const DEFAULT_MEMBERS = ['阿啾', '小芯', '小柯', '小彭', '吻仔魚', '佳玲'];
@@ -278,12 +281,93 @@ async function getLeaveRecordsForDate(dateStr) {
   return rows.slice(1).filter(row => row[0] === dateStr);
 }
 
+// 本週（週一~週日）的請假記錄
+async function getLeaveRecordsThisWeek() {
+  const rows = await readRange('請假記錄!A:F');
+  if (!rows || rows.length < 2) return [];
+  const { start, end } = getThisWeekRange();
+  return rows.slice(1).filter(r => r[0] && r[0] >= start && r[0] <= end);
+}
+
+// 指定月份（YYYY/MM）的請假記錄
+async function getLeaveRecordsForMonth(monthStr) {
+  const rows = await readRange('請假記錄!A:F');
+  if (!rows || rows.length < 2) return [];
+  return rows.slice(1).filter(r => r[0] && r[0].startsWith(monthStr));
+}
+
+// 查某人在某日是否已有請假記錄（用於重複偵測）
+async function getLeaveRecordForUserOnDate(lineUserId, dateStr) {
+  const rows = await readRange('請假記錄!A:F');
+  if (!rows || rows.length < 2) return null;
+  const found = rows.slice(1).find(r => r[0] === dateStr && r[3] === lineUserId);
+  if (!found) return null;
+  return {
+    leaveDate: found[0], submitTime: found[1], name: found[2],
+    lineUserId: found[3], leaveType: found[4] || '', hours: found[5] || '',
+  };
+}
+
+// 取得分頁的 numeric sheetId（刪除列時需要）
+async function getSheetIdByTitle(title) {
+  const sheets = await getSheets();
+  if (!sheets) return null;
+  try {
+    const res = await sheets.spreadsheets.get({
+      spreadsheetId: process.env.GOOGLE_SHEETS_ID,
+      fields: 'sheets.properties(sheetId,title)',
+    });
+    const s = (res.data.sheets || []).find(x => x.properties.title === title);
+    return s ? s.properties.sheetId : null;
+  } catch (err) {
+    console.error('取得分頁 ID 失敗：', err.message);
+    return null;
+  }
+}
+
+// 刪除某人某日的請假記錄；回傳被刪的記錄物件，或 null（找不到/失敗）
+async function deleteLeaveRecordForUserOnDate(lineUserId, dateStr) {
+  const sheets = await getSheets();
+  if (!sheets) return null;
+  const rows = await readRange('請假記錄!A:F');
+  if (!rows || rows.length < 2) return null;
+  let idx = -1;                                  // rows 陣列索引 = 試算表 0-based 列索引
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i][0] === dateStr && rows[i][3] === lineUserId) { idx = i; break; }
+  }
+  if (idx === -1) return null;
+  const removed = {
+    leaveDate: rows[idx][0], submitTime: rows[idx][1], name: rows[idx][2],
+    lineUserId: rows[idx][3], leaveType: rows[idx][4] || '', hours: rows[idx][5] || '',
+  };
+  const sheetId = await getSheetIdByTitle('請假記錄');
+  if (sheetId == null) return null;
+  try {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: process.env.GOOGLE_SHEETS_ID,
+      requestBody: { requests: [{ deleteDimension: {
+        range: { sheetId, dimension: 'ROWS', startIndex: idx, endIndex: idx + 1 },
+      } }] },
+    });
+    return removed;
+  } catch (err) {
+    console.error('刪除請假記錄失敗：', err.message);
+    return null;
+  }
+}
+
 // ============================================================
 // 月度異常記錄
 // 欄位：月份 | 小編名稱 | 異常日期 | 異常類型
 // ============================================================
 
 async function saveMonthlyRecord({ month, name, date, anomalyType }) {
+  const rows = await readRange('月度記錄!A:D');
+  if (rows && rows.length > 1) {
+    const dup = rows.slice(1).some(r =>
+      r[0] === month && r[1] === name && r[2] === date && r[3] === anomalyType);
+    if (dup) return true;
+  }
   return appendRow('月度記錄', [month, name, date, anomalyType]);
 }
 
@@ -325,7 +409,8 @@ function getTaiwanTimeString(date = new Date()) {
 
 function getThisWeekRange() {
   const now = new Date();
-  const dayOfWeek = now.getDay();
+  const taiwanNow = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
+  const dayOfWeek = taiwanNow.getDay();
   const diffToMonday = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
   const diffToSunday = dayOfWeek === 0 ? 0 : 7 - dayOfWeek;
   const monday = new Date(now);
@@ -388,6 +473,11 @@ module.exports = {
   getWeeklyLogs,
   saveLeaveRecord,
   getLeaveRecordsForDate,
+  getLeaveRecordsThisWeek,
+  getLeaveRecordsForMonth,
+  getLeaveRecordForUserOnDate,
+  deleteLeaveRecordForUserOnDate,
+  getSheetIdByTitle,
   savePublishReport,
   getTodayPublishReports,
   saveMonthlyRecord,
