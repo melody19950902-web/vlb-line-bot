@@ -47,6 +47,9 @@ function isEditProgress(text) {
   return /^剪輯進度[｜|]/.test(text.trim());
 }
 
+// 中文數字對照（1~10）
+const CN_NUM = { 一:1, 兩:2, 二:2, 三:3, 四:4, 五:5, 六:6, 七:7, 八:8, 九:9, 十:10 };
+
 // 請假 / 補休（記錄後回覆確認；重複則提醒已記錄）
 // 當天僅 病假／事假；明日 事假／特休／休假／補休
 // 「明天／明日」「今日／今天」四種講法皆等價；通用「請假」回傳 vague，由 processLeaveRequest 反問假別
@@ -62,8 +65,6 @@ function parseLeaveRequest(text) {
   if (t === '今日補休半天') return { leaveType: '補休', hours: 4, isToday: true };
   if (t === '今日早上補休半天') return { leaveType: '補休', hours: 4, session: '早上', isToday: true };
   if (t === '今日下午補休半天') return { leaveType: '補休', hours: 4, session: '下午', isToday: true };
-  const todayHoursMatch = t.match(/^今日補休\s*(\d+(?:\.\d+)?)\s*小時$/);
-  if (todayHoursMatch) return { leaveType: '補休', hours: parseFloat(todayHoursMatch[1]), isToday: true };
   // 明日（前一天預告）
   if (t === '明天事假') return { leaveType: '事假', isToday: false };
   if (t === '明天特休') return { leaveType: '特休', isToday: false };
@@ -74,8 +75,12 @@ function parseLeaveRequest(text) {
   if (t === '明天補休半天') return { leaveType: '補休', hours: 4, isToday: false };
   if (t === '明天早上補休半天') return { leaveType: '補休', hours: 4, session: '早上', isToday: false };
   if (t === '明天下午補休半天') return { leaveType: '補休', hours: 4, session: '下午', isToday: false };
-  const hoursMatch = t.match(/^明天補休\s*(\d+(?:\.\d+)?)\s*小時$/);
-  if (hoursMatch) return { leaveType: '補休', hours: parseFloat(hoursMatch[1]), isToday: false };
+  // 今日／明天 補休 N 小時（支援阿拉伯與中文數字）
+  const hoursMatch = t.match(/^(今日|明天)補休\s*([\d.]+|[一兩二三四五六七八九十])\s*小時$/);
+  if (hoursMatch) {
+    const v = CN_NUM[hoursMatch[2]] != null ? CN_NUM[hoursMatch[2]] : parseFloat(hoursMatch[2]);
+    if (v > 0) return { leaveType: '補休', hours: v, isToday: hoursMatch[1] === '今日' };
+  }
   return null;
 }
 
