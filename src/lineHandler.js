@@ -54,10 +54,16 @@ function parseLeaveRequest(text) {
   if (!text) return null;
   // 開頭統一正規化：明日→明天、今天→今日
   const t = text.trim().replace(/^明日/, '明天').replace(/^今天/, '今日');
-  // 當天：只允許病假與臨時事假
+  // 當天：病假、臨時事假、當日補休
   if (t === '今日病假') return { leaveType: '病假', isToday: true };
   if (t === '今日事假') return { leaveType: '事假', isToday: true };
   if (t === '今日請假') return { vague: true, isToday: true };
+  if (t === '今日補休' || t === '今日補休一天') return { leaveType: '補休', isToday: true };
+  if (t === '今日補休半天') return { leaveType: '補休', hours: 4, isToday: true };
+  if (t === '今日早上補休半天') return { leaveType: '補休', hours: 4, session: '早上', isToday: true };
+  if (t === '今日下午補休半天') return { leaveType: '補休', hours: 4, session: '下午', isToday: true };
+  const todayHoursMatch = t.match(/^今日補休\s*(\d+(?:\.\d+)?)\s*小時$/);
+  if (todayHoursMatch) return { leaveType: '補休', hours: parseFloat(todayHoursMatch[1]), isToday: true };
   // 明日（前一天預告）
   if (t === '明天事假') return { leaveType: '事假', isToday: false };
   if (t === '明天特休') return { leaveType: '特休', isToday: false };
@@ -194,7 +200,7 @@ async function processEditProgress(text, userId, client, source) {
 
 async function processLeaveRequest(text, userId, client, source, leaveInfo) {
   if (leaveInfo.vague) {
-    return '請問你要請哪一種假？\n・當天可請：今日病假、今日事假\n・前一天預告：明日事假、明日特休、明日休假、明日補休\n請改傳明確的假別，謝謝。';
+    return '請問你要請哪一種假？\n・當天可請：今日病假、今日事假、今日補休\n・前一天預告：明日事假、明日特休、明日休假、明日補休\n請改傳明確的假別，謝謝。';
   }
 
   const memberName = await getMemberDisplayName(userId, client, source);

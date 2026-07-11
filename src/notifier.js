@@ -343,7 +343,19 @@ async function sendDailySummary(client) {
       }
 
       const analysis = await analyzeWorkLog(parsedLog, name);
-      const comp = compHoursOf(name);
+      const logComp = parsedLog.compHours || 0;
+      let comp = compHoursOf(name);
+      if (logComp > 0 && !leaveMap.get(name)) {
+        // 日誌寫了補休但沒有獨立請假記錄 → 自動補一筆，讓請假統計完整
+        await saveLeaveRecord({
+          leaveDate: today, submitTime: getTaiwanTimeString(),
+          name, lineUserId: row[3], leaveType: '補休', hours: logComp,
+        });
+        leaveMap.set(name, { type: '補休', hours: logComp });
+        comp = logComp;
+      } else {
+        comp = Math.max(comp, logComp);
+      }
       const finalAnalysis = comp > 0
         ? applyCompLeaveAdjustment(analysis, parsedLog, { compHours: comp, minHours })
         : analysis;

@@ -117,6 +117,36 @@ function parsePublishMinutes(timeLogRaw) {
 }
 
 // ============================================================
+// 文字型補休擷取（非時間段行 / 備註 / 一般文字）
+// 支援：補休半天／補休 N 小時／補休 N.5 小時／補休兩小時（中文數字一~十）
+// 回傳累加分鐘數
+// ============================================================
+const CN_NUM = { 一:1, 兩:2, 二:2, 三:3, 四:4, 五:5, 六:6, 七:7, 八:8, 九:9, 十:10 };
+
+function extractTextCompMinutes(text) {
+  if (!text) return 0;
+  let total = 0;
+  for (const line of text.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    // 時間段行交給 timeEntries 掃描，不重複計算
+    if (/^\d{1,2}[：:]\d{2}\s*[-–—]/.test(t)) continue;
+    // 半天
+    const halfMatches = t.match(/補休半天/g);
+    if (halfMatches) total += halfMatches.length * 240;
+    // N 小時 / N.5 小時 / 中文數字小時
+    const hoursRe = /補休\s*([\d.]+|[一兩二三四五六七八九十])\s*小時/g;
+    let m;
+    while ((m = hoursRe.exec(t)) !== null) {
+      const raw = m[1];
+      const num = /^[\d.]+$/.test(raw) ? parseFloat(raw) : CN_NUM[raw];
+      if (num > 0) total += Math.round(num * 60);
+    }
+  }
+  return total;
+}
+
+// ============================================================
 // 解析完整工作日誌格式
 // ============================================================
 function parseWorkLog(text) {
@@ -149,7 +179,7 @@ function parseWorkLog(text) {
   const timeLogMatch = normalized.match(/時間記錄:\s*\n([\s\S]+?)(?=備註:|$)/);
   const timeLogRaw = timeLogMatch ? timeLogMatch[1].trim() : '';
 
-  const timeEntries = [];
+  const rawTimeEntries = [];
   if (timeLogRaw) {
     const linePattern = /(\d{1,2}:\d{2})\s*[-–—]\s*(\d{1,2}:\d{2})\s+(.+)/g;
     let m;
@@ -166,22 +196,35 @@ function parseWorkLog(text) {
         batchCount = videoCount;
       }
 
-      timeEntries.push({ startTime, endTime, task, duration: rawDuration, effectiveMins, batchCount });
+      rawTimeEntries.push({ startTime, endTime, task, duration: rawDuration, effectiveMins, batchCount });
     }
+  }
+
+  // --- 補休時段抽出：任務含「補休」的時段不計工時、不計可剪輯時間 ---
+  const timeEntries = [];
+  let compMinutesFromEntries = 0;
+  for (const e of rawTimeEntries) {
+    if (/補休/.test(e.task)) compMinutesFromEntries += e.effectiveMins;
+    else timeEntries.push(e);
   }
 
   // --- 備註（選填，可多行）---
   const notesMatch = normalized.match(/備註:\s*([\s\S]+)/);
   const notes = notesMatch ? notesMatch[1].trim() : '';
 
+  // --- 文字型補休：掃 timeLogRaw 的非時間段行與 notes ---
+  const compMinutesFromText = extractTextCompMinutes(timeLogRaw) + extractTextCompMinutes(notes);
+  const compMinutes = compMinutesFromEntries + compMinutesFromText;
+  const compHours   = Math.round(compMinutes / 6) / 10;
+
   // --- 發布工時（非時間段行）---
   const publishMinutes = parsePublishMinutes(timeLogRaw);
 
-  // --- 有效總工時（任務時段直接加總 + 發布工時）---
+  // --- 有效總工時（移除補休後，任務時段加總 + 發布工時）---
   const effectiveTotalMinutes = timeEntries.reduce((sum, e) => sum + e.effectiveMins, 0) + publishMinutes;
   const effectiveTotalHours   = Math.round(effectiveTotalMinutes / 6) / 10;
 
-  // --- 原始總工時（任務時段加總，不含發布工時）---
+  // --- 原始總工時（移除補休後，任務時段加總，不含發布工時）---
   const totalMinutes = timeEntries.reduce((sum, e) => sum + e.duration, 0);
   const totalHours   = Math.round(totalMinutes / 6) / 10;
 
@@ -203,6 +246,7 @@ function parseWorkLog(text) {
     totalMinutes, totalHours,
     effectiveTotalMinutes, effectiveTotalHours,
     publishMinutes,
+    compMinutes, compHours,
     gaps, notes, limitedStoryCount,
   };
 }
