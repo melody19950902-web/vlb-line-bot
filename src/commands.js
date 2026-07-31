@@ -6,6 +6,7 @@ const {
   getLeaveRecordsThisWeek, getLeaveRecordsForMonth,
   getMonthLogs,
 } = require('./sheets');
+const { computeWeeklyProductivity } = require('./productivity');
 
 // ============================================================
 // 說明文字
@@ -20,6 +21,7 @@ const HELP_TEXT = `📋 VLB 設計部工作查核系統
 本月請假　→ 本月每人請假統計
 本月剪輯統計 → 本月每人剪輯支數合計
 上月剪輯統計 → 上月每人剪輯支數合計
+本週產能　→ 本週影片/輪播達標統計（依請假調整）
 @姓名 狀況 → 查詢特定小編
 　（例：@小芯 狀況）
 說明　　　→ 顯示此說明
@@ -73,6 +75,7 @@ function detectCommand(text) {
   if (t === '本月請假' || t === '本月請假統計') return { type: 'monthlyLeave' };
   if (t === '本月剪輯統計') return { type: 'videoStats', which: 'current' };
   if (t === '上月剪輯統計') return { type: 'videoStats', which: 'prev' };
+  if (t === '本週產能' || t === '產能檢查') return { type: 'weeklyProductivity' };
   const personMatch = t.match(/^@(.+?)\s*狀況$/);
   if (personMatch) return { type: 'person', name: personMatch[1].trim() };
   return null;
@@ -95,6 +98,7 @@ async function handleCommand(text, userId) {
   if (cmd.type === 'weeklyLeave')  return formatWeeklyLeave();
   if (cmd.type === 'monthlyLeave') return formatMonthlyLeave();
   if (cmd.type === 'videoStats')   return formatVideoStats(cmd.which);
+  if (cmd.type === 'weeklyProductivity') return formatWeeklyProductivity();
   if (cmd.type === 'person')       return formatPersonStatus(cmd.name);
 
   return null;
@@ -156,10 +160,11 @@ async function formatWeeklyReport() {
   for (const row of logs) {
     const name = row[2];
     if (!name) continue;
-    if (!statsMap.has(name)) statsMap.set(name, { days: 0, videos: 0, alerts: 0, warnings: 0 });
+    if (!statsMap.has(name)) statsMap.set(name, { days: 0, videos: 0, carousels: 0, alerts: 0, warnings: 0 });
     const s = statsMap.get(name);
     s.days++;
-    s.videos += parseInt(row[5]) || 0;
+    s.videos    += parseInt(row[5])  || 0;
+    s.carousels += parseInt(row[10]) || 0;
     if (row[7] === 'alert')   s.alerts++;
     if (row[7] === 'warning') s.warnings++;
   }
@@ -175,9 +180,30 @@ async function formatWeeklyReport() {
       : s.warnings > 0
         ? `⚠️ ${s.warnings}次警告`
         : '✅ 全部正常';
-    lines.push(`${name}：${s.days}天｜${s.videos}支影片｜${statusPart}`);
+    lines.push(`${name}：${s.days}天｜${s.videos}支影片｜${s.carousels}篇輪播｜${statusPart}`);
   }
 
+  return lines.join('\n');
+}
+
+// ============================================================
+// 本週產能（純查詢，不寫入月度記錄）
+// ============================================================
+async function formatWeeklyProductivity() {
+  const stats = await computeWeeklyProductivity();
+  if (stats.length === 0) return '📊 本週產能無資料可統計。';
+  const minV = stats[0].minV, minC = stats[0].minC;
+  const lines = [`📊 VLB 本週產能`, `標準：每週 ${minV} 支影片、${minC} 篇輪播（依請假天數等比例調整）`, ``];
+  for (const s of stats) {
+    const vTag = s.videoOk ? '✅' : '❌';
+    const cTag = s.carouselOk ? '✅' : '❌';
+    const leaveNote = s.leaveDays > 0 ? `（請假 ${s.leaveDays} 天）` : '';
+    lines.push(`${s.name}｜影片 ${vTag} ${s.videos}/${s.needV}｜輪播 ${cTag} ${s.carousels}/${s.needC}${leaveNote}`);
+  }
+  const missed = stats.filter(s => !s.ok);
+  lines.push('', missed.length === 0
+    ? `全員達標，辛苦了！`
+    : `未達標：${missed.map(s => s.name).join('、')}`);
   return lines.join('\n');
 }
 

@@ -1,13 +1,14 @@
 'use strict';
 const nodemailer = require('nodemailer');
 const {
-  getTodayLogs, getAllMemberNames, getLeaveRecordsForDate,
+  getTodayLogs, getAllMemberNames, getAllMembers, getLeaveRecordsForDate,
   getTaiwanDateString, getTaiwanTimeString,
-  saveWorkLog, getTodayPublishReports,
+  saveWorkLog, saveLeaveRecord, getTodayPublishReports,
   saveMonthlyRecord, getMonthlyAnomalies, getTaiwanMonthString,
   getSopSettings, getMonthLogs, saveMonthlyVideoStats,
 } = require('./sheets');
 const { parseWorkLog, analyzeWorkLog, applyCompLeaveAdjustment } = require('./analyzer');
+const { computeWeeklyProductivity } = require('./productivity');
 
 // ============================================================
 // LINE 推播通知
@@ -195,15 +196,19 @@ function isTaiwanSunday() {
 async function sendSaturdaySummary(client) {
   const today = getTaiwanDateString();
 
-  const [allMembers, leaveRecords, publishReportMap] = await Promise.all([
+  const [allMembers, members, leaveRecords, publishReportMap] = await Promise.all([
     getAllMemberNames(),
+    getAllMembers(),
     getLeaveRecordsForDate(today),
     getTodayPublishReports(),
   ]);
 
+  // ID 優先的請假對照表；姓名一律 trim
+  const idToName = new Map(members.filter(m => m.id).map(m => [m.id, m.name]));
   const leaveTypeMap = new Map();
   for (const r of leaveRecords) {
-    if (r[2]) leaveTypeMap.set(r[2], r[4] || '請假');
+    const name = idToName.get((r[3] || '').trim()) || (r[2] || '').trim();
+    if (name) leaveTypeMap.set(name, r[4] || '請假');
   }
 
   const header = [`📢 VLB 週六發布查核 ${today}`, ``];
@@ -246,37 +251,25 @@ async function sendSaturdaySummary(client) {
 // ============================================================
 
 async function sendDailySummary(client) {
-  // 是否為台灣時區月底（明天進入下個月）
-  const taiwanNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
-  const twTomorrow = new Date(taiwanNow); twTomorrow.setDate(twTomorrow.getDate() + 1);
-  const isMonthEnd = twTomorrow.getMonth() !== taiwanNow.getMonth();
-
-  // 週日不執行任何彙整；月底仍發影片統計
+  // 週日不執行任何彙整（月底統計已移除，一律用查詢指令）
   if (isTaiwanSunday()) {
     console.log('🔕 今日為週日，不執行彙整');
-    if (isMonthEnd) {
-      const members = await getAllMemberNames();
-      await sendMonthlyVideoReport(client, getTaiwanMonthString(), members);
-    }
     return;
   }
 
-  // 週六只查發布，不查工作日誌；月底仍發影片統計
+  // 週六只查發布，不查工作日誌
   if (isTaiwanSaturday()) {
     await sendSaturdaySummary(client);
-    if (isMonthEnd) {
-      const members = await getAllMemberNames();
-      await sendMonthlyVideoReport(client, getTaiwanMonthString(), members);
-    }
     return;
   }
 
   const today = getTaiwanDateString();
   const month = getTaiwanMonthString();
 
-  const [logs, allMembers, leaveRecords, publishReportMap, sopSettings] = await Promise.all([
+  const [logs, allMembers, members, leaveRecords, publishReportMap, sopSettings] = await Promise.all([
     getTodayLogs(),
     getAllMemberNames(),
+    getAllMembers(),
     getLeaveRecordsForDate(today),
     getTodayPublishReports(),
     getSopSettings(),
@@ -284,10 +277,12 @@ async function sendDailySummary(client) {
 
   console.log(`📂 [請假記錄] 今日(${today})共 ${leaveRecords.length} 筆請假記錄：${leaveRecords.map(r => r[2]).join('、') || '無'}`);
 
-  // 請假對照表：name → { type, hours }
+  // ID 優先的請假對照表：name → { type, hours }（姓名一律 trim）
+  const idToName = new Map(members.filter(m => m.id).map(m => [m.id, m.name]));
   const leaveMap = new Map();
   for (const r of leaveRecords) {
-    if (r[2]) leaveMap.set(r[2], { type: r[4] || '請假', hours: parseFloat(r[5]) || 0 });
+    const name = idToName.get((r[3] || '').trim()) || (r[2] || '').trim();
+    if (name) leaveMap.set(name, { type: r[4] || '請假', hours: parseFloat(r[5]) || 0 });
   }
   // 補休時數：只有補休且有指定時數（如半天 4 小時）才回傳 > 0；整天補休回 0
   const compHoursOf = (name) => {
@@ -330,6 +325,7 @@ async function sendDailySummary(client) {
         await saveWorkLog({
           date: today, time, name, lineUserId: row[3],
           dayType: row[4] || '未知', videoCount: parseInt(row[5]) || 0,
+          carouselCount: parseInt(row[10]) || 0,
           timeLog: mergedTimeLog, status: 'warning',
           anomalies: failAnomalies, notes: row[9] || '',
         });
@@ -338,6 +334,7 @@ async function sendDailySummary(client) {
           row[4] || '未知', row[5] || '0',
           mergedTimeLog, 'warning',
           failAnomalies.join('；'), row[9] || '',
+          row[10] || '0',
         ]);
         continue;
       }
@@ -371,6 +368,7 @@ async function sendDailySummary(client) {
       await saveWorkLog({
         date: today, time, name, lineUserId: row[3],
         dayType: parsedLog.dayType, videoCount: parsedLog.videoCount,
+        carouselCount: parsedLog.carouselCount || 0,
         timeLog: mergedTimeLog, status: finalAnalysis.status,
         anomalies: finalAnalysis.anomalies, notes: parsedLog.notes || '',
       });
@@ -381,6 +379,7 @@ async function sendDailySummary(client) {
         parsedLog.dayType, String(parsedLog.videoCount),
         mergedTimeLog, finalAnalysis.status,
         finalAnalysis.anomalies.join('；'), parsedLog.notes || '',
+        String(parsedLog.carouselCount || 0),
       ]);
     } catch (err) {
       console.error(`22:30 分析 ${name} 失敗：`, err.message);
@@ -391,6 +390,7 @@ async function sendDailySummary(client) {
         await saveWorkLog({
           date: today, time, name, lineUserId: row[3],
           dayType: row[4] || '未知', videoCount: parseInt(row[5]) || 0,
+          carouselCount: parseInt(row[10]) || 0,
           timeLog: row[6] || '', status: 'warning',
           anomalies: failAnomalies, notes: row[9] || '',
         });
@@ -399,6 +399,7 @@ async function sendDailySummary(client) {
           row[4] || '未知', row[5] || '0',
           row[6] || '', 'warning',
           failAnomalies.join('；'), row[9] || '',
+          row[10] || '0',
         ]);
       } catch (saveErr) {
         console.error(`22:30 寫入失敗記錄也失敗 ${name}：`, saveErr.message);
@@ -406,53 +407,55 @@ async function sendDailySummary(client) {
     }
   }
 
-  const header = [`📊 VLB 今日工作回報 ${today}`, ``];
-  const groupLines = [...header];
-  const adminLines = [...header];
-
+  // ============================================================
+  // 逐人歸類：異常者、正常者、請假者、未發布者
+  // 只有「異常/未回報/pending」會列出；正常者做彙總、請假者做彙總
+  // ============================================================
+  const problemLines = [];      // 群組版：⚠️/🚨/❗/❓
+  const problemAdminLines = []; // 主管版（含時數細節）
   const needsFollowUp = [];
   const monthlyToRecord = [];
   const notPublishedToday = [];
+  const leaveList = [];         // 用於「今日請假：」彙總
+  const normalNames = [];       // 用於「其餘 N 人正常。」
+  let reportedCount = 0;
 
   for (const name of allMembers) {
     const leave = leaveMap.get(name);
     const comp = compHoursOf(name);
     console.log(`🔍 [22:30查核] ${name} | 請假=${leave ? leave.type : '無'}${comp > 0 ? `(補休${comp}小時)` : ''} | 工作日誌=${latestByName.has(name) ? '有' : '無'}`);
 
-    // 整天請假（含整天補休）／其他假別 → 跳過工作日誌顯示（不查發布）
+    // 整天請假（含整天補休）／其他假別 → 進入請假彙總，不列個人行、不查發布
     if (leave && comp === 0) {
-      if (leave.type === '病假') { groupLines.push(`🏥 ${name}｜病假`); adminLines.push(`🏥 ${name}｜病假`); continue; }
-      if (leave.type === '事假') { groupLines.push(`📋 ${name}｜事假`); adminLines.push(`📋 ${name}｜事假`); continue; }
-      groupLines.push(`🏖️ ${name}｜${leave.type}（已請假）`);
-      adminLines.push(`🏖️ ${name}｜${leave.type}（已請假）`);
+      leaveList.push({ name, type: leave.type });
       continue;
     }
     // 補休半天：改走工作日誌顯示，並標註補休時數
     const compNote = comp > 0 ? `（補休${comp}小時）` : '';
-    // 平日發布查核：只顯示與點名，不寫入月度記錄、不改 status
     const published = (publishReportMap.get(name) || []).length > 0;
     const pubNote = published ? '' : '｜📢未發布';
     if (!published) notPublishedToday.push(name);
 
     const row = latestByName.get(name);
     if (!row) {
-      groupLines.push(`❗ ${name}｜未回報且未請假${compNote}${pubNote}`);
-      adminLines.push(`❗ ${name}｜未回報且未請假${compNote}${pubNote}`);
+      problemLines.push(`❗ ${name}｜未回報且未請假${compNote}${pubNote}`);
+      problemAdminLines.push(`❗ ${name}｜未回報且未請假${compNote}${pubNote}`);
       monthlyToRecord.push({ name, anomalyType: '未回報' });
       needsFollowUp.push(name);
     } else if (row[7] === 'pending') {
-      groupLines.push(`❓ ${name}｜分析待確認${compNote}${pubNote}`);
-      adminLines.push(`❓ ${name}｜分析待確認${compNote}${pubNote}`);
+      problemLines.push(`❓ ${name}｜分析待確認${compNote}${pubNote}`);
+      problemAdminLines.push(`❓ ${name}｜分析待確認${compNote}${pubNote}`);
       needsFollowUp.push(name);
+      reportedCount++;
     } else if (row[7] === 'normal') {
-      const line = `✅ ${name}｜正常${compNote}${pubNote}`;
-      groupLines.push(line);
-      adminLines.push(line);
+      // 正常者不列個別行，計入彙總
+      normalNames.push(name);
+      reportedCount++;
     } else {
       const allAnomalies = (row[8] || '').split('；').filter(Boolean);
       const reason = allAnomalies[0];
       const emoji = row[7] === 'alert' ? '🚨' : '⚠️';
-      groupLines.push(`${emoji} ${name}｜${reason}${compNote}${pubNote}`);
+      problemLines.push(`${emoji} ${name}｜${reason}${compNote}${pubNote}`);
 
       // 主管版：若有時數異常，附上實際時數與不足量（用該人套用的最低工時）
       const hoursDetail = hoursDetailMap.get(name);
@@ -467,32 +470,65 @@ async function sendDailySummary(client) {
           adminReason = `${reason}（另：${hoursNote}）`;
         }
       }
-      adminLines.push(`${emoji} ${name}｜${adminReason}${compNote}${pubNote}`);
+      problemAdminLines.push(`${emoji} ${name}｜${adminReason}${compNote}${pubNote}`);
 
       for (const anomalyType of allAnomalies) {
         monthlyToRecord.push({ name, anomalyType });
       }
       needsFollowUp.push(name);
+      reportedCount++;
     }
   }
 
-  const allNormal = needsFollowUp.length === 0;
-  const footer = [
-    ``,
-    allNormal
-      ? `${allMembers.length} 人全員正常，辛苦了！`
-      : `${allMembers.length} 人狀態已確認。`,
-    ...(needsFollowUp.length > 0 ? [`請 ${needsFollowUp.join('、')} 補充說明。`] : []),
-    ...(notPublishedToday.length > 0 ? [`📢 今日尚未回報發布：${notPublishedToday.join('、')}，請補「已發布｜平台｜帳號」。`] : []),
-  ];
-  groupLines.push(...footer);
-  adminLines.push(...footer);
+  // ============================================================
+  // 組裝訊息
+  // 全員正常且無未回報 + 無未發布 → 單行心跳
+  // 否則：異常/未回報/pending 逐行 + 尾端「其餘 N 人正常」+「今日請假」+「未發布點名」
+  // ============================================================
+  const expectedCount = allMembers.length - leaveList.length;
+  const isAllClean = problemLines.length === 0 && notPublishedToday.length === 0;
 
-  // 群組推播開關：穩定觀察期間僅推給主管，待後台穩定後設為 true
+  const leaveSummary = leaveList.length > 0
+    ? `今日請假：${leaveList.map(l => `${l.name} ${l.type}`).join('、')}`
+    : null;
+
+  let groupMsg, adminMsg;
+  if (isAllClean && problemLines.length === 0) {
+    // 心跳（若有請假，順帶列一行）
+    const heartbeat = [`✅ ${today} 全員正常（回報 ${reportedCount}/${expectedCount}）`];
+    if (leaveSummary) heartbeat.push(leaveSummary);
+    groupMsg = heartbeat.join('\n');
+    adminMsg = heartbeat.join('\n');
+  } else {
+    const header = `📊 VLB 今日工作回報 ${today}`;
+    const restNormalLine = normalNames.length > 0 ? `其餘 ${normalNames.length} 人正常。` : null;
+
+    const body = [
+      header, ``,
+      ...problemLines,
+      ``,
+      ...(restNormalLine ? [restNormalLine] : []),
+      ...(leaveSummary ? [leaveSummary] : []),
+      ...(needsFollowUp.length > 0 ? [`請 ${needsFollowUp.join('、')} 補充說明。`] : []),
+      ...(notPublishedToday.length > 0 ? [`📢 今日尚未回報發布：${notPublishedToday.join('、')}，請補「已發布｜平台｜帳號」。`] : []),
+    ];
+    const bodyAdmin = [
+      header, ``,
+      ...problemAdminLines,
+      ``,
+      ...(restNormalLine ? [restNormalLine] : []),
+      ...(leaveSummary ? [leaveSummary] : []),
+      ...(needsFollowUp.length > 0 ? [`請 ${needsFollowUp.join('、')} 補充說明。`] : []),
+      ...(notPublishedToday.length > 0 ? [`📢 今日尚未回報發布：${notPublishedToday.join('、')}，請補「已發布｜平台｜帳號」。`] : []),
+    ];
+    groupMsg = body.join('\n');
+    adminMsg = bodyAdmin.join('\n');
+  }
+
   const groupEnabled = process.env.GROUP_NOTIFY_ENABLED === 'true';
-  const tasks = [notifyAdminLine(client, adminLines.join('\n'))];
+  const tasks = [notifyAdminLine(client, adminMsg)];
   if (groupEnabled) {
-    tasks.push(notifyGroup(client, groupLines.join('\n')));
+    tasks.push(notifyGroup(client, groupMsg));
   } else {
     console.log('🔕 GROUP_NOTIFY_ENABLED 未開啟，本次彙整僅推播主管');
   }
@@ -525,8 +561,57 @@ async function sendDailySummary(client) {
     }
   }));
 
-  // 月底：發送當月影片統計（isMonthEnd 已於函式開頭以台灣時區計算）
-  if (isMonthEnd) await sendMonthlyVideoReport(client, month, allMembers);
+  // 週五 22:30 額外執行每週產能檢查
+  if (isTaiwanFriday()) {
+    await sendWeeklyProductivityCheck(client);
+  }
 }
 
-module.exports = { notifyAdminLine, notifyGroup, sendEmailAlert, sendAnomalyAlert, sendDailySummary, sendMonthlyVideoReport };
+// ============================================================
+// 台灣時間今天是否為週五
+// ============================================================
+function isTaiwanFriday() {
+  const taiwanDate = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
+  return taiwanDate.getDay() === 5;
+}
+
+// ============================================================
+// 每週產能檢查（週五 22:30 觸發）
+// 早於「產能檢查啟用日」→ 直接 return
+// 未達標者寫入月度記錄（產能不足，冪等去重）
+// 有人未達標才推主管；全達標僅 console.log
+// ============================================================
+async function sendWeeklyProductivityCheck(client) {
+  const sop = await getSopSettings();
+  const startDate = (sop['產能檢查啟用日'] || '').trim();
+  const today = getTaiwanDateString();
+  if (startDate && today < startDate) {
+    console.log(`⏳ 產能檢查啟用日 ${startDate}，今日 ${today} 尚未到，略過`);
+    return;
+  }
+
+  const stats = await computeWeeklyProductivity();
+  const missed = stats.filter(s => !s.ok);
+  const month = getTaiwanMonthString();
+
+  for (const s of missed) {
+    await saveMonthlyRecord({ month, name: s.name, date: today, anomalyType: '產能不足' });
+  }
+
+  if (missed.length === 0) {
+    console.log(`✅ 本週產能全員達標`);
+    return;
+  }
+
+  const lines = [`📊 VLB 本週產能未達標`, ``];
+  for (const s of missed) {
+    const vTag = s.videoOk ? '✅' : '❌';
+    const cTag = s.carouselOk ? '✅' : '❌';
+    const leaveNote = s.leaveDays > 0 ? `（請假 ${s.leaveDays} 天）` : '';
+    lines.push(`${s.name}｜影片 ${vTag} ${s.videos}/${s.needV}｜輪播 ${cTag} ${s.carousels}/${s.needC}${leaveNote}`);
+  }
+  await notifyAdminLine(client, lines.join('\n'));
+  console.log(`📊 本週產能未達標 ${missed.length} 人已通報主管`);
+}
+
+module.exports = { notifyAdminLine, notifyGroup, sendEmailAlert, sendAnomalyAlert, sendDailySummary, sendMonthlyVideoReport, sendWeeklyProductivityCheck };

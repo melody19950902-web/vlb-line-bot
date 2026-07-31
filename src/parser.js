@@ -174,6 +174,10 @@ function parseWorkLog(text) {
   if (!videoMatch) return { error: '缺少「影片數量」欄位，或數量非數字' };
   const videoCount = parseInt(videoMatch[1]);
 
+  // --- 輪播數量（選填，沒填 = 0）---
+  const carouselMatch = normalized.match(/輪播數量:\s*(\d+)/);
+  const carouselCount = carouselMatch ? parseInt(carouselMatch[1]) : 0;
+
   // --- 時間記錄（選填）---
   // 有時間 → 用時間輔助計算；沒有或格式不標準 → 忽略時間，不拒絕日誌
   const timeLogMatch = normalized.match(/時間記錄:\s*\n([\s\S]+?)(?=備註:|$)/);
@@ -242,7 +246,7 @@ function parseWorkLog(text) {
   const limitedStoryCount = extractLimitedStoryCount(timeEntries);
 
   return {
-    dayType, videoCount, timeEntries, timeLogRaw,
+    dayType, videoCount, carouselCount, timeEntries, timeLogRaw,
     totalMinutes, totalHours,
     effectiveTotalMinutes, effectiveTotalHours,
     publishMinutes,

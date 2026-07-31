@@ -19,6 +19,8 @@ const cache = {
 const DEFAULT_SOP_SETTINGS = {
   '最低工時_小時':   '6',
   '空白時段上限_分': '120',
+  '每週最低影片數':  '12',
+  '每週最低輪播數':  '6',
 };
 
 const DEFAULT_TASK_TIME_RULES = [
@@ -206,28 +208,38 @@ async function getAllMemberNames() {
   return names.length > 0 ? names : DEFAULT_MEMBERS;
 }
 
+// 完整成員資料（姓名 + LINE_User_ID），供以 ID 為主鍵的比對使用
+async function getAllMembers() {
+  const rows = await readRange('成員名單!A:B');
+  if (!rows || rows.length < 2) return DEFAULT_MEMBERS.map(name => ({ name, id: '' }));
+  return rows.slice(1)
+    .map(row => ({ name: (row[0] || '').trim(), id: (row[1] || '').trim() }))
+    .filter(m => m.name);
+}
+
 // ============================================================
 // 工作記錄讀寫
 // 欄位：日期 | 時間 | 姓名 | LINE_User_ID | 工作類型 | 影片數量 | 時間記錄 | 狀態 | 異常說明 | 備註
 // ============================================================
 
-async function saveWorkLog({ date, time, name, lineUserId, dayType, videoCount, timeLog, status, anomalies, notes }) {
+async function saveWorkLog({ date, time, name, lineUserId, dayType, videoCount, timeLog, status, anomalies, notes, carouselCount }) {
   const anomalyText = Array.isArray(anomalies) ? anomalies.join('；') : (anomalies || '');
   return appendRow('工作記錄', [
     date, time, name, lineUserId, dayType,
     String(videoCount), timeLog, status, anomalyText, notes || '',
+    String(carouselCount != null ? carouselCount : 0),
   ]);
 }
 
 async function getTodayLogs() {
-  const rows = await readRange('工作記錄!A:J');
+  const rows = await readRange('工作記錄!A:K');
   if (!rows || rows.length < 2) return [];
   const today = getTaiwanDateString();
   return rows.slice(1).filter(row => row[0] === today);
 }
 
 async function getWeeklyLogs(memberName = null) {
-  const rows = await readRange('工作記錄!A:J');
+  const rows = await readRange('工作記錄!A:K');
   if (!rows || rows.length < 2) return [];
   const { start, end } = getThisWeekRange();
   return rows.slice(1).filter(row => {
@@ -453,7 +465,7 @@ async function getFingerprints(fileType) {
 // ============================================================
 
 async function getMonthLogs(month) {
-  const rows = await readRange('工作記錄!A:J');
+  const rows = await readRange('工作記錄!A:K');
   if (!rows || rows.length < 2) return [];
   return rows.slice(1).filter(row => row[0] && row[0].startsWith(month));
 }
@@ -468,6 +480,7 @@ module.exports = {
   getDayTypeRules,
   getMemberName,
   getAllMemberNames,
+  getAllMembers,
   saveWorkLog,
   getTodayLogs,
   getWeeklyLogs,

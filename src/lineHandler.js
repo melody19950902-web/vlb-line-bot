@@ -137,6 +137,7 @@ async function processWorkLog(text, userId, client, source) {
     date, time, name: memberName, lineUserId: userId,
     dayType:    parsedLog.dayType    || '未知',
     videoCount: parsedLog.videoCount ?? 0,
+    carouselCount: parsedLog.carouselCount ?? 0,
     timeLog:    parsedLog.timeLogRaw || text,
     status: 'pending',
     anomalies: [], notes: parsedLog.notes || '',
@@ -160,7 +161,7 @@ async function processSpecialDayLog(text, userId, client, source, specialDay) {
 
   await saveWorkLog({
     date, time, name: memberName, lineUserId: userId,
-    dayType: specialDay.dayType, videoCount: 0,
+    dayType: specialDay.dayType, videoCount: 0, carouselCount: 0,
     timeLog: text, status: 'normal', anomalies: [], notes,
   });
 
