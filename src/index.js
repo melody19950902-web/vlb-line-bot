@@ -77,3 +77,15 @@ setInterval(async () => {
     console.error('每日彙整發送失敗：', err.message);
   }
 }, 60 * 1000);
+
+// 自我保活：每 10 分鐘 ping 自己的公開網址，防止 Render 免費方案休眠
+// Render 會自動注入 RENDER_EXTERNAL_URL
+const SELF_URL = process.env.RENDER_EXTERNAL_URL || 'https://vlb-line-bot.onrender.com';
+setInterval(async () => {
+  try {
+    const res = await fetch(SELF_URL);
+    console.log(`💓 [保活] ping ${res.status}`);
+  } catch (err) {
+    console.error('保活 ping 失敗：', err.message);
+  }
+}, 10 * 60 * 1000);

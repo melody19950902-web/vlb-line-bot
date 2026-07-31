@@ -4,7 +4,7 @@ const {
   getTaiwanDateString, getTaiwanTimeString,
   getMonthlyAnomalies, getTaiwanMonthString,
   getLeaveRecordsThisWeek, getLeaveRecordsForMonth,
-  getMonthLogs,
+  getMonthLogs, getSopSettings,
 } = require('./sheets');
 const { computeWeeklyProductivity } = require('./productivity');
 
@@ -45,6 +45,9 @@ Podcast日、直播日、外拍半天、外拍一天
 課程拍攝 3 小時
 直播 2 小時
 
+【全員可用（群組或私聊皆可）】
+本月工作進度統計 → 全員本月影片/輪播統計
+
 【當天臨時請假】
 今日病假、今日事假
 今日補休（今日補休半天／今日補休 X 小時）
@@ -76,6 +79,8 @@ function detectCommand(text) {
   if (t === '本月剪輯統計') return { type: 'videoStats', which: 'current' };
   if (t === '上月剪輯統計') return { type: 'videoStats', which: 'prev' };
   if (t === '本週產能' || t === '產能檢查') return { type: 'weeklyProductivity' };
+  // 全員可用的月度統計（允許前綴 @機器人名稱）
+  if (/^(@\S+\s*)?本月工作進度統計$/.test(t)) return { type: 'publicMonthlyStats' };
   const personMatch = t.match(/^@(.+?)\s*狀況$/);
   if (personMatch) return { type: 'person', name: personMatch[1].trim() };
   return null;
@@ -87,6 +92,8 @@ async function handleCommand(text, userId) {
 
   if (cmd.type === 'help') return HELP_TEXT;
   if (cmd.type === 'myid') return `你的 LINE User ID 是：\n${userId}`;
+  // 全員可用（群組或私聊皆可）—— 放在管理員權限檢查之前
+  if (cmd.type === 'publicMonthlyStats') return formatPublicMonthlyStats();
 
   if (userId !== process.env.ADMIN_LINE_USER_ID) {
     return '🔒 此指令僅限管理員使用。\n輸入「說明」查看回報格式。';
@@ -321,6 +328,50 @@ async function formatVideoStats(which) {
     lines.push(`${name}：${c} 支`);
   }
   lines.push('', `團隊合計：${total} 支`, '（來源：工作記錄各日最後一筆影片數量）');
+  return lines.join('\n');
+}
+
+// ============================================================
+// 全員可用：本月工作進度統計（群組或私聊皆可）
+// 每人每天取最後一筆的影片/輪播數量，加總
+// ============================================================
+async function formatPublicMonthlyStats() {
+  const month = getTaiwanMonthString();
+  const [logs, allMembers, sop] = await Promise.all([
+    getMonthLogs(month), getAllMemberNames(), getSopSettings(),
+  ]);
+  const minV = parseFloat(sop['每週最低影片數'] || '12');
+  const minC = parseFloat(sop['每週最低輪播數'] || '6');
+
+  // 每人每天取最後一筆
+  const latestPerDay = new Map(); // `${name}|${date}` → { v, c }
+  for (const row of logs) {
+    if (!row[0] || !row[2]) continue;
+    const key = `${(row[2] || '').trim()}|${row[0]}`;
+    latestPerDay.set(key, {
+      v: parseInt(row[5]) || 0,
+      c: parseInt(row[10]) || 0,
+    });
+  }
+
+  const totals = new Map();
+  for (const [key, val] of latestPerDay) {
+    const name = key.split('|')[0];
+    if (!totals.has(name)) totals.set(name, { videos: 0, carousels: 0 });
+    const s = totals.get(name);
+    s.videos    += val.v;
+    s.carousels += val.c;
+  }
+
+  const lines = [`📊 VLB ${month} 工作進度統計`, ``];
+  let totalV = 0, totalC = 0;
+  for (const name of allMembers) {
+    const s = totals.get(name) || { videos: 0, carousels: 0 };
+    totalV += s.videos; totalC += s.carousels;
+    lines.push(`${name}：影片 ${s.videos} 支｜輪播 ${s.carousels} 篇`);
+  }
+  lines.push('', `團隊合計：影片 ${totalV} 支｜輪播 ${totalC} 篇`);
+  lines.push(`（每週標準：影片 ${minV} 支＋輪播 ${minC} 篇／人）`);
   return lines.join('\n');
 }
 
