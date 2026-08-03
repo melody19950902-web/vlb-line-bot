@@ -5,7 +5,7 @@ const {
   getTaiwanDateString, getTaiwanTimeString,
   saveWorkLog, saveLeaveRecord, getTodayPublishReports,
   saveMonthlyRecord, getMonthlyAnomalies, getTaiwanMonthString,
-  getSopSettings, getMonthLogs, saveMonthlyVideoStats,
+  getSopSettings, getMonthLogs, saveMonthlyVideoStats, getHolidaySet,
 } = require('./sheets');
 const { parseWorkLog, analyzeWorkLog, applyCompLeaveAdjustment } = require('./analyzer');
 const { computeWeeklyProductivity } = require('./productivity');
@@ -237,11 +237,8 @@ async function sendSaturdaySummary(client) {
     lines.push(`請 ${notPublished.join('、')} 確認發布狀況。`);
   }
 
-  const msg = lines.join('\n');
-  const groupEnabled = process.env.GROUP_NOTIFY_ENABLED === 'true';
-  const tasks = [notifyAdminLine(client, msg)];
-  if (groupEnabled) tasks.push(notifyGroup(client, msg));
-  await Promise.all(tasks);
+  // 系統推播僅限主管私訊（群組推播已停用）
+  await notifyAdminLine(client, lines.join('\n'));
 
   console.log(`📢 週六發布查核已發送，未發布：${notPublished.length} 人`);
 }
@@ -255,6 +252,13 @@ async function sendDailySummary(client) {
   if (isTaiwanSunday()) {
     console.log('🔕 今日為週日，不執行彙整');
     return;
+  }
+
+  // 國定假日：不查工作日誌，僅查發布（與週六同）
+  const holidays = await getHolidaySet();
+  if (holidays.has(getTaiwanDateString())) {
+    console.log('🎌 今日為國定假日，只查發布');
+    return sendSaturdaySummary(client);
   }
 
   // 週六只查發布，不查工作日誌
@@ -410,8 +414,8 @@ async function sendDailySummary(client) {
   // ============================================================
   // 逐人歸類：異常者、正常者、請假者、未發布者
   // 只有「異常/未回報/pending」會列出；正常者做彙總、請假者做彙總
+  // 系統推播僅限主管私訊（群組推播已停用）
   // ============================================================
-  const problemLines = [];      // 群組版：⚠️/🚨/❗/❓
   const problemAdminLines = []; // 主管版（含時數細節）
   const needsFollowUp = [];
   const monthlyToRecord = [];
@@ -438,12 +442,10 @@ async function sendDailySummary(client) {
 
     const row = latestByName.get(name);
     if (!row) {
-      problemLines.push(`❗ ${name}｜未回報且未請假${compNote}${pubNote}`);
       problemAdminLines.push(`❗ ${name}｜未回報且未請假${compNote}${pubNote}`);
       monthlyToRecord.push({ name, anomalyType: '未回報' });
       needsFollowUp.push(name);
     } else if (row[7] === 'pending') {
-      problemLines.push(`❓ ${name}｜分析待確認${compNote}${pubNote}`);
       problemAdminLines.push(`❓ ${name}｜分析待確認${compNote}${pubNote}`);
       needsFollowUp.push(name);
       reportedCount++;
@@ -455,7 +457,6 @@ async function sendDailySummary(client) {
       const allAnomalies = (row[8] || '').split('；').filter(Boolean);
       const reason = allAnomalies[0];
       const emoji = row[7] === 'alert' ? '🚨' : '⚠️';
-      problemLines.push(`${emoji} ${name}｜${reason}${compNote}${pubNote}`);
 
       // 主管版：若有時數異常，附上實際時數與不足量（用該人套用的最低工時）
       const hoursDetail = hoursDetailMap.get(name);
@@ -481,38 +482,26 @@ async function sendDailySummary(client) {
   }
 
   // ============================================================
-  // 組裝訊息
+  // 組裝訊息（僅推主管私訊；群組推播已停用）
   // 全員正常且無未回報 + 無未發布 → 單行心跳
   // 否則：異常/未回報/pending 逐行 + 尾端「其餘 N 人正常」+「今日請假」+「未發布點名」
   // ============================================================
   const expectedCount = allMembers.length - leaveList.length;
-  const isAllClean = problemLines.length === 0 && notPublishedToday.length === 0;
+  const isAllClean = problemAdminLines.length === 0 && notPublishedToday.length === 0;
 
   const leaveSummary = leaveList.length > 0
     ? `今日請假：${leaveList.map(l => `${l.name} ${l.type}`).join('、')}`
     : null;
 
-  let groupMsg, adminMsg;
-  if (isAllClean && problemLines.length === 0) {
-    // 心跳（若有請假，順帶列一行）
+  let adminMsg;
+  if (isAllClean) {
     const heartbeat = [`✅ ${today} 全員正常（回報 ${reportedCount}/${expectedCount}）`];
     if (leaveSummary) heartbeat.push(leaveSummary);
-    groupMsg = heartbeat.join('\n');
     adminMsg = heartbeat.join('\n');
   } else {
     const header = `📊 VLB 今日工作回報 ${today}`;
     const restNormalLine = normalNames.length > 0 ? `其餘 ${normalNames.length} 人正常。` : null;
-
-    const body = [
-      header, ``,
-      ...problemLines,
-      ``,
-      ...(restNormalLine ? [restNormalLine] : []),
-      ...(leaveSummary ? [leaveSummary] : []),
-      ...(needsFollowUp.length > 0 ? [`請 ${needsFollowUp.join('、')} 補充說明。`] : []),
-      ...(notPublishedToday.length > 0 ? [`📢 今日尚未回報發布：${notPublishedToday.join('、')}，請補「已發布｜平台｜帳號」。`] : []),
-    ];
-    const bodyAdmin = [
+    adminMsg = [
       header, ``,
       ...problemAdminLines,
       ``,
@@ -520,19 +509,10 @@ async function sendDailySummary(client) {
       ...(leaveSummary ? [leaveSummary] : []),
       ...(needsFollowUp.length > 0 ? [`請 ${needsFollowUp.join('、')} 補充說明。`] : []),
       ...(notPublishedToday.length > 0 ? [`📢 今日尚未回報發布：${notPublishedToday.join('、')}，請補「已發布｜平台｜帳號」。`] : []),
-    ];
-    groupMsg = body.join('\n');
-    adminMsg = bodyAdmin.join('\n');
+    ].join('\n');
   }
 
-  const groupEnabled = process.env.GROUP_NOTIFY_ENABLED === 'true';
-  const tasks = [notifyAdminLine(client, adminMsg)];
-  if (groupEnabled) {
-    tasks.push(notifyGroup(client, groupMsg));
-  } else {
-    console.log('🔕 GROUP_NOTIFY_ENABLED 未開啟，本次彙整僅推播主管');
-  }
-  await Promise.all(tasks);
+  await notifyAdminLine(client, adminMsg);
 
   // 月度異常記錄與達標通報（並行化）
   await Promise.all(monthlyToRecord.map(async ({ name, anomalyType }) => {
@@ -603,7 +583,10 @@ async function sendWeeklyProductivityCheck(client) {
     return;
   }
 
-  const lines = [`📊 VLB 本週產能未達標`, ``];
+  const holidayDays = stats[0].holidayDays || 0;
+  const lines = [`📊 VLB 本週產能未達標`];
+  if (holidayDays > 0) lines.push(`本週含國定假日 ${holidayDays} 天，需求已折算`);
+  lines.push('');
   for (const s of missed) {
     const vTag = s.videoOk ? '✅' : '❌';
     const cTag = s.carouselOk ? '✅' : '❌';

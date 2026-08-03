@@ -204,12 +204,17 @@ async function formatWeeklyProductivity() {
   const stats = await computeWeeklyProductivity();
   if (stats.length === 0) return '📊 本週產能無資料可統計。';
   const minV = stats[0].minV, minC = stats[0].minC;
-  const lines = [`📊 VLB 本週產能`, `標準：每週 ${minV} 支影片、${minC} 篇輪播（依請假天數等比例調整）`, ``];
+  const holidayDays = stats[0].holidayDays || 0;
+  const lines = [`📊 VLB 本週產能`, `標準：每週 ${minV} 支影片、${minC} 篇輪播（依請假/國定假日等比例調整）`];
+  if (holidayDays > 0) lines.push(`本週含國定假日 ${holidayDays} 天`);
+  lines.push('');
   for (const s of stats) {
     const vTag = s.videoOk ? '✅' : '❌';
     const cTag = s.carouselOk ? '✅' : '❌';
-    const leaveNote = s.leaveDays > 0 ? `（請假 ${s.leaveDays} 天）` : '';
-    lines.push(`${s.name}｜影片 ${vTag} ${s.videos}/${s.needV}｜輪播 ${cTag} ${s.carousels}/${s.needC}${leaveNote}`);
+    const notes = [];
+    if (s.leaveDays > 0) notes.push(`請假 ${s.leaveDays} 天`);
+    const noteStr = notes.length ? `（${notes.join('、')}）` : '';
+    lines.push(`${s.name}｜影片 ${vTag} ${s.videos}/${s.needV}｜輪播 ${cTag} ${s.carousels}/${s.needC}${noteStr}`);
   }
   const missed = stats.filter(s => !s.ok);
   lines.push('', missed.length === 0

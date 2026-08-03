@@ -1,26 +1,46 @@
 'use strict';
 const {
   getWeeklyLogs, getSopSettings, getAllMemberNames, getAllMembers,
-  getLeaveRecordsThisWeek,
+  getLeaveRecordsThisWeek, getHolidaySet, getTaiwanDateString,
 } = require('./sheets');
+
+// 本週（週一~週五）落在國定假日的天數
+function countHolidayWeekdays(holidays) {
+  const taiwanNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
+  const dow = taiwanNow.getDay(); // 0=Sun
+  // 找本週一
+  const monOffset = dow === 0 ? -6 : 1 - dow;
+  const monday = new Date();
+  monday.setDate(monday.getDate() + monOffset);
+  let h = 0;
+  for (let i = 0; i < 5; i++) {
+    const d = new Date(monday);
+    d.setDate(monday.getDate() + i);
+    if (holidays.has(getTaiwanDateString(d))) h++;
+  }
+  return h;
+}
 
 // ============================================================
 // 每週產能計算（週五 22:30 檢查 + 主管指令「本週產能」共用）
 // 每筆請假：有時數(hours>0) → +hours/8 天；無時數 → +1 天
-// needV = round(每週最低影片數 * (5 - 請假天數) / 5)，下限 0
-// needC = round(每週最低輪播數 * (5 - 請假天數) / 5)，下限 0
+// 國定假日折算：本週（週一~週五）落在假日的天數 h
+// needV = round(每週最低影片數 * (5 - h - 請假天數) / 5)，下限 0
+// needC = round(每週最低輪播數 * (5 - h - 請假天數) / 5)，下限 0
 // ============================================================
 async function computeWeeklyProductivity() {
-  const [logs, allMemberNames, members, sop, leaves] = await Promise.all([
+  const [logs, allMemberNames, members, sop, leaves, holidays] = await Promise.all([
     getWeeklyLogs(),
     getAllMemberNames(),
     getAllMembers(),
     getSopSettings(),
     getLeaveRecordsThisWeek(),
+    getHolidaySet(),
   ]);
 
   const minV = parseFloat(sop['每週最低影片數'] || '12');
   const minC = parseFloat(sop['每週最低輪播數'] || '6');
+  const holidayDays = countHolidayWeekdays(holidays);
 
   // 每人每天取最後一筆的影片數量與輪播數量
   const latestPerDay = new Map(); // `${name}|${date}` → { v, c }
@@ -58,11 +78,12 @@ async function computeWeeklyProductivity() {
     const s = totals.get(name) || { videos: 0, carousels: 0 };
     const leaveDaysRaw = leaveByName.get(name) || 0;
     const leaveDays = Math.round(leaveDaysRaw * 10) / 10; // 一位小數
-    const needV = Math.max(0, Math.round(minV * (5 - leaveDays) / 5));
-    const needC = Math.max(0, Math.round(minC * (5 - leaveDays) / 5));
+    const availableDays = Math.max(0, 5 - holidayDays - leaveDays);
+    const needV = Math.max(0, Math.round(minV * availableDays / 5));
+    const needC = Math.max(0, Math.round(minC * availableDays / 5));
     return {
       name, videos: s.videos, carousels: s.carousels,
-      leaveDays, needV, needC,
+      leaveDays, holidayDays, needV, needC,
       videoOk: s.videos >= needV,
       carouselOk: s.carousels >= needC,
       ok: s.videos >= needV && s.carousels >= needC,

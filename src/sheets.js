@@ -10,6 +10,7 @@ const cache = {
   sopSettings:   { data: null, at: 0 },
   taskTimeRules: { data: null, at: 0 },
   dayTypeRules:  { data: null, at: 0 },
+  holidays:      { data: null, at: 0 },
 };
 
 // ============================================================
@@ -206,6 +207,24 @@ async function getAllMemberNames() {
   if (!rows || rows.length < 2) return DEFAULT_MEMBERS;
   const names = rows.slice(1).map(row => row[0]?.trim()).filter(Boolean);
   return names.length > 0 ? names : DEFAULT_MEMBERS;
+}
+
+// 國定假日集合（10 分鐘快取；分頁不存在或讀取失敗回空 Set，不影響運作）
+async function getHolidaySet() {
+  const now = Date.now();
+  if (cache.holidays.data && now - cache.holidays.at < CACHE_TTL_MS) {
+    return cache.holidays.data;
+  }
+  const rows = await readRange('國定假日!A:B');
+  const set = new Set();
+  if (rows && rows.length >= 2) {
+    for (const r of rows.slice(1)) {
+      const d = (r[0] || '').trim();
+      if (d) set.add(d);
+    }
+  }
+  cache.holidays = { data: set, at: now };
+  return set;
 }
 
 // 完整成員資料（姓名 + LINE_User_ID），供以 ID 為主鍵的比對使用
@@ -481,6 +500,7 @@ module.exports = {
   getMemberName,
   getAllMemberNames,
   getAllMembers,
+  getHolidaySet,
   saveWorkLog,
   getTodayLogs,
   getWeeklyLogs,
