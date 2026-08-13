@@ -228,6 +228,46 @@ async function getHolidaySet() {
   return set;
 }
 
+// 成員名單寫入 / 刪除（供主管指令使用）
+async function addMember({ name, lineUserId }) {
+  return appendRow('成員名單', [name, lineUserId]);
+}
+
+async function _removeMemberBy(predicate) {
+  const sheetsApi = await getSheets();
+  if (!sheetsApi) return null;
+  const rows = await readRange('成員名單!A:B');
+  if (!rows || rows.length < 2) return null;
+  let idx = -1;
+  for (let i = 1; i < rows.length; i++) {
+    if (predicate(rows[i])) { idx = i; break; }
+  }
+  if (idx === -1) return null;
+  const removed = { name: (rows[idx][0] || '').trim(), id: (rows[idx][1] || '').trim() };
+  const sheetId = await getSheetIdByTitle('成員名單');
+  if (sheetId == null) return null;
+  try {
+    await sheetsApi.spreadsheets.batchUpdate({
+      spreadsheetId: process.env.GOOGLE_SHEETS_ID,
+      requestBody: { requests: [{ deleteDimension: {
+        range: { sheetId, dimension: 'ROWS', startIndex: idx, endIndex: idx + 1 },
+      } }] },
+    });
+    return removed;
+  } catch (err) {
+    console.error('刪除成員失敗：', err.message);
+    return null;
+  }
+}
+
+async function removeMemberByName(name) {
+  return _removeMemberBy(row => (row[0] || '').trim() === name);
+}
+
+async function removeMemberById(lineUserId) {
+  return _removeMemberBy(row => (row[1] || '').trim() === lineUserId);
+}
+
 // 請假例外（主管手動設定的長期請假區間）
 // 欄位：姓名 | LINE_User_ID | 假別 | 開始日期 | 結束日期 | 備註
 // 回傳陣列，每項含 { name, lineUserId, leaveType, startDate, endDate, note }
@@ -539,6 +579,9 @@ module.exports = {
   getHolidaySet,
   getAllLeaveExceptions,
   getLeaveExceptionsForDate,
+  addMember,
+  removeMemberByName,
+  removeMemberById,
   saveWorkLog,
   getTodayLogs,
   getWeeklyLogs,

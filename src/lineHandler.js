@@ -7,6 +7,8 @@ const { saveWorkLog, savePublishReport, saveLeaveRecord, saveEditProgress, getMe
         getTaiwanDateString, getTaiwanTimeString }           = require('./sheets');
 
 const { handleCommand }                                      = require('./commands');
+const managerCommands                                        = require('./managerCommands');
+const { maybeNotifyUnknownUser }                             = require('./unknownUserNotifier');
 
 // ============================================================
 // 格式錯誤提示
@@ -500,6 +502,32 @@ async function handleEvent(event, client) {
   let replyText;
 
   try {
+    // ========== 主管指令（最高優先，含兩段式互動狀態） ==========
+    // 主管本人：交給 managerCommands 處理（有處理則直接回覆）
+    if (managerCommands.isManager(userId)) {
+      const managerReply = await managerCommands.handleManagerCommand(text, userId);
+      if (managerReply) {
+        await client.replyMessage({
+          replyToken,
+          messages: [{ type: 'text', text: managerReply }],
+        });
+        return;
+      }
+      // 主管未觸發指令 → 繼續走原本流程
+    } else if (managerCommands.isRestrictedKeyword(text)) {
+      // 非主管誤觸「新增成員／移除成員／成員列表」→ 直接擋下
+      await client.replyMessage({
+        replyToken,
+        messages: [{ type: 'text', text: '此為主管專用指令。' }],
+      });
+      return;
+    }
+
+    // ========== 未登記使用者被動通知（僅私訊；不改變原流程） ==========
+    // fire-and-forget：即便通知失敗也不影響原訊息處理
+    maybeNotifyUnknownUser({ userId, text, sourceType: source.type, client })
+      .catch(err => console.error('未登記通知失敗：', err.message));
+
     // 群組 ID 查詢
     if (text === '群組ID') {
       replyText = source.type === 'group'
