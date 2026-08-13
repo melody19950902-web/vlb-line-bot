@@ -7,6 +7,25 @@ const {
   getMonthLogs, getSopSettings,
 } = require('./sheets');
 const { computeWeeklyProductivity } = require('./productivity');
+const catalog = require('./commandCatalog');
+
+// ============================================================
+// 指令註冊：每新增一條 detectCommand 分支，也在這裡登記，
+// 「功能」清單就會自動更新，不需另外維護。
+// audience: 'public'=所有人; 'admin'/'manager'=僅主管
+// ============================================================
+catalog.register({ triggers: ['今日狀況'],                  audience: 'admin',   category: '進度查詢｜每日', description: '所有人今日回報一覽（每人狀態、影片數、是否已交）' });
+catalog.register({ triggers: ['週報'],                      audience: 'admin',   category: '進度查詢｜每週', description: '本週每人天數、影片、輪播、警告/異常次數' });
+catalog.register({ triggers: ['本週產能', '產能檢查'],       audience: 'admin',   category: '進度查詢｜每週', description: '本週影片/輪播達標統計（依請假與國定假日折算）' });
+catalog.register({ triggers: ['月報'],                      audience: 'admin',   category: '進度查詢｜每月', description: '本月每人異常累計次數與日期' });
+catalog.register({ triggers: ['本月工作進度統計'],           audience: 'public',  category: '進度查詢｜每月', description: '全員本月影片支數＋輪播篇數（可加 @機器人名 前綴）' });
+catalog.register({ triggers: ['本月剪輯統計'],               audience: 'admin',   category: '進度查詢｜每月', description: '本月每人剪輯支數合計（獎金核對用）' });
+catalog.register({ triggers: ['上月剪輯統計'],               audience: 'admin',   category: '進度查詢｜每月', description: '上月每人剪輯支數合計（獎金核對用）' });
+catalog.register({ triggers: ['本週請假'],                  audience: 'admin',   category: '請假查詢',       description: '本週誰請假一覽' });
+catalog.register({ triggers: ['本月請假', '本月請假統計'],   audience: 'admin',   category: '請假查詢',       description: '本月每人請假次數與類型分布' });
+catalog.register({ triggers: ['@姓名 狀況'],                audience: 'admin',   category: '個人查詢',       description: '查詢特定成員本週工作記錄', example: '@小芯 狀況' });
+catalog.register({ triggers: ['我的ID', 'myid'],            audience: 'public',  category: '說明',           description: '顯示你的 LINE User ID（新人交給主管加入名單用）' });
+catalog.register({ triggers: ['說明'],                      audience: 'public',  category: '說明',           description: '顯示回報格式與工作類型詳細說明' });
 
 // ============================================================
 // 說明文字

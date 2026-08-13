@@ -3,6 +3,17 @@
 // MANAGER_USER_IDS（逗號分隔）為授權清單；未設定則 fallback 到 ADMIN_LINE_USER_ID
 const { getAllMembers, addMember, removeMemberByName, removeMemberById,
         getAllLeaveExceptions, addLeaveException } = require('./sheets');
+const catalog = require('./commandCatalog');
+
+// ============================================================
+// 指令註冊（新增/修改主管指令時，同步更新這裡即可）
+// ============================================================
+catalog.register({ triggers: ['新增成員'],                                                 audience: 'manager', category: '成員管理（主管）', description: '兩段式：先傳「新增成員」，bot 進入模式後貼「姓名 U開頭ID」' });
+catalog.register({ triggers: ['移除成員'],                                                 audience: 'manager', category: '成員管理（主管）', description: '兩段式：先傳「移除成員」，bot 進入模式後貼「姓名」（同名多筆時改貼 ID）' });
+catalog.register({ triggers: ['成員列表'],                                                 audience: 'manager', category: '成員管理（主管）', description: '查看目前所有成員（ID 只顯示後 4 碼）' });
+catalog.register({ triggers: ['請假 <姓名或ID> <假別> <開始日期> <結束日期> [備註]'],       audience: 'manager', category: '長期請假（主管）', description: '一次寫入長期請假區間（起訖含當日）', example: '請假 吻仔魚 公假 2026/08/01 2026/08/16 8/17 回來上班' });
+catalog.register({ triggers: ['長期請假列表'],                                             audience: 'manager', category: '長期請假（主管）', description: '查看目前所有長期請假區間' });
+catalog.register({ triggers: ['功能', '指令', '選單', 'help', '?', '？'],                    audience: 'public',  category: '說明',             description: '顯示這份完整指令清單（依你的角色過濾）' });
 
 const STATE_TTL_MS = 5 * 60 * 1000;
 const pendingState = new Map(); // userId → { mode: 'add'|'remove', expiresAt: number }
@@ -54,28 +65,16 @@ function _getPending(userId) {
   return s;
 }
 
-function helpMessage() {
-  return [
-    '📋 主管指令',
-    '',
-    '【成員】',
-    '• 新增成員：先傳「新增成員」，bot 進入模式後，貼「姓名 U開頭ID」',
-    '• 移除成員：先傳「移除成員」，bot 進入模式後，貼「姓名」（同名多筆時改貼 U 開頭 ID）',
-    '• 成員列表：查看目前所有成員',
-    '',
-    '【長期請假（區間）】',
-    '• 請假 <姓名或ID> <假別> <開始日期> <結束日期> [備註]',
-    '  例：請假 吻仔魚 公假 2026/08/01 2026/08/16 8/17 回來上班',
-    '  假別可填：公假／特休／事假／病假／休假／補休／育嬰假／產假',
-    '  日期格式 YYYY/MM/DD、含起訖',
-    '• 長期請假列表：查看目前所有長期請假區間',
-    '',
-    '【說明】',
-    '• 功能：顯示這份指令清單（同義字：指令 / 選單 / help / ?）',
-    '',
-    '進入新增／移除模式後，5 分鐘內未貼資料會自動失效。',
-    '在模式中傳「取消」可提前結束。',
-  ].join('\n');
+function helpMessage(userId) {
+  const isAdmin   = !!userId && userId === process.env.ADMIN_LINE_USER_ID;
+  const asManager = isManager(userId);
+  const entries   = catalog.forRole({ isAdmin, isManager: asManager });
+  const body      = catalog.buildHelpMessage(entries);
+  // 補一段主管專屬的操作提示
+  if (asManager) {
+    return body + '\n\n💡 進入新增／移除模式後，5 分鐘內未貼資料會自動失效；模式中傳「取消」可提前結束。';
+  }
+  return body;
 }
 
 async function listLeaveExceptionsMessage() {
@@ -215,8 +214,12 @@ async function _handleRemoveInput(text, userId) {
 
 // 主管訊息主入口。回傳字串 = 已處理要回覆；回傳 null = 未處理，由呼叫端繼續其他流程
 async function handleManagerCommand(rawText, userId) {
-  if (!isManager(userId)) return null;
   const text = normalize(rawText);
+  // HELP 類指令對所有人開放，依角色渲染不同的清單
+  if (HELP_KEYWORDS.has(text)) return helpMessage(userId);
+
+  // 以下為主管專用
+  if (!isManager(userId)) return null;
   const pending = _getPending(userId);
 
   // 模式中：允許取消
@@ -226,7 +229,6 @@ async function handleManagerCommand(rawText, userId) {
   }
 
   // 主指令永遠優先（即使處於模式中，也允許切換）
-  if (HELP_KEYWORDS.has(text))       return helpMessage();
   if (text === LIST_KEYWORD)         return listMembersMessage();
   if (text === LEAVE_LIST_KEYWORD)   return listLeaveExceptionsMessage();
   if (text.startsWith(LEAVE_ADD_PREFIX + ' ')) return handleLeaveAdd(text);

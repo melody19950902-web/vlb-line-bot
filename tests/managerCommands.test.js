@@ -4,27 +4,40 @@
 let mockMembers = [];
 let mockLeaveExceptions = [];
 
+// commands.js 也會 require sheets 的一堆函式；為避免載入時炸掉，把它需要的欄位都補齊（回傳空即可）
 jest.mock('../src/sheets', () => ({
-  getAllMembers:        jest.fn(async () => mockMembers.map(m => ({ ...m }))),
-  addMember:            jest.fn(async ({ name, lineUserId }) => { mockMembers.push({ name, id: lineUserId }); return true; }),
-  removeMemberByName:   jest.fn(async (name) => {
+  getAllMembers:            jest.fn(async () => mockMembers.map(m => ({ ...m }))),
+  addMember:                jest.fn(async ({ name, lineUserId }) => { mockMembers.push({ name, id: lineUserId }); return true; }),
+  removeMemberByName:       jest.fn(async (name) => {
     const idx = mockMembers.findIndex(m => m.name === name);
     if (idx === -1) return null;
     const [removed] = mockMembers.splice(idx, 1);
     return removed;
   }),
-  removeMemberById:     jest.fn(async (id) => {
+  removeMemberById:         jest.fn(async (id) => {
     const idx = mockMembers.findIndex(m => m.id === id);
     if (idx === -1) return null;
     const [removed] = mockMembers.splice(idx, 1);
     return removed;
   }),
-  getAllLeaveExceptions: jest.fn(async () => mockLeaveExceptions.map(e => ({ ...e }))),
-  addLeaveException:     jest.fn(async ({ name, lineUserId, leaveType, startDate, endDate, note }) => {
+  getAllLeaveExceptions:    jest.fn(async () => mockLeaveExceptions.map(e => ({ ...e }))),
+  addLeaveException:        jest.fn(async ({ name, lineUserId, leaveType, startDate, endDate, note }) => {
     mockLeaveExceptions.push({ name, lineUserId, leaveType, startDate, endDate, note: note || '' });
     return true;
   }),
-  getTaiwanDateString:  jest.fn().mockReturnValue('2026/08/14'),
+  getTaiwanDateString:      jest.fn().mockReturnValue('2026/08/14'),
+  // commands.js 需要（載入時不會呼叫，只需存在）
+  getTodayLogs:             jest.fn(async () => []),
+  getWeeklyLogs:            jest.fn(async () => []),
+  getAllMemberNames:        jest.fn(async () => []),
+  getTaiwanTimeString:      jest.fn().mockReturnValue('10:00'),
+  getMonthlyAnomalies:      jest.fn(async () => []),
+  getTaiwanMonthString:     jest.fn().mockReturnValue('2026/08'),
+  getLeaveRecordsThisWeek:  jest.fn(async () => []),
+  getLeaveRecordsForMonth:  jest.fn(async () => []),
+  getMonthLogs:             jest.fn(async () => []),
+  getSopSettings:           jest.fn(async () => ({})),
+  getHolidaySet:            jest.fn(async () => new Set()),
 }));
 
 const MANAGER_ID = 'U11111111111111111111111111111111';
@@ -32,8 +45,11 @@ const OTHER_ID   = 'U22222222222222222222222222222222';
 const VALID_ID   = 'U1234567890abcdef1234567890abcdef';
 
 process.env.MANAGER_USER_IDS = MANAGER_ID;
+process.env.ADMIN_LINE_USER_ID = MANAGER_ID; // 讓 catalog 判斷 isAdmin 也對得上
 
 const mc = require('../src/managerCommands');
+// 也載入 commands.js，確保它把公開指令（今日狀況、本月工作進度統計 等）註冊進 catalog
+require('../src/commands');
 
 beforeEach(() => {
   mockMembers = [
@@ -54,9 +70,18 @@ describe('權限', () => {
     expect(mc.isManager(undefined)).toBe(false);
   });
 
-  test('非主管呼叫 handleManagerCommand 一律回 null', async () => {
+  test('非主管呼叫寫入型指令 → 一律回 null（由 lineHandler 決定要不要回主管專用）', async () => {
     expect(await mc.handleManagerCommand('新增成員', OTHER_ID)).toBeNull();
-    expect(await mc.handleManagerCommand('功能', OTHER_ID)).toBeNull();
+    expect(await mc.handleManagerCommand('移除成員', OTHER_ID)).toBeNull();
+    expect(await mc.handleManagerCommand('成員列表', OTHER_ID)).toBeNull();
+  });
+
+  test('非主管呼叫「功能」→ 回公開清單（不包含成員管理）', async () => {
+    const reply = await mc.handleManagerCommand('功能', OTHER_ID);
+    expect(reply).toContain('指令清單');
+    expect(reply).toContain('本月工作進度統計'); // 公開
+    expect(reply).not.toContain('新增成員');    // manager-only 不顯示
+    expect(reply).not.toContain('長期請假列表');
   });
 
   test('isRestrictedKeyword 只擋改動類指令，不擋 help/? 等資訊類', () => {
@@ -86,13 +111,24 @@ describe('normalize', () => {
 // ============================================================
 // 功能／同義字
 // ============================================================
-describe('功能／help 同義字', () => {
-  test.each(['功能', '指令', '選單', 'help', 'Help', 'HELP', '?', '？'])('%s → 顯示指令清單', async (kw) => {
+describe('功能／help 同義字（主管）', () => {
+  test.each(['功能', '指令', '選單', 'help', 'Help', 'HELP', '?', '？'])('%s → 顯示完整指令清單', async (kw) => {
     const reply = await mc.handleManagerCommand(kw, MANAGER_ID);
-    expect(reply).toContain('主管指令');
+    expect(reply).toContain('指令清單');
+    // 主管專用指令
     expect(reply).toContain('新增成員');
     expect(reply).toContain('移除成員');
     expect(reply).toContain('成員列表');
+    expect(reply).toContain('長期請假列表');
+    // 進度查詢（admin 或 public 皆會顯示給主管）
+    expect(reply).toContain('今日狀況');
+    expect(reply).toContain('週報');
+    expect(reply).toContain('本週產能');
+    expect(reply).toContain('月報');
+    expect(reply).toContain('本月工作進度統計');
+    expect(reply).toContain('本月剪輯統計');
+    // 尾端主管操作提示
+    expect(reply).toContain('取消');
   });
 });
 
@@ -385,13 +421,25 @@ describe('長期請假列表', () => {
 });
 
 // ============================================================
-// 功能清單包含新指令
+// 功能清單包含新指令（catalog 整合）
 // ============================================================
 describe('功能清單', () => {
   test('顯示長期請假與請假列表', async () => {
     const reply = await mc.handleManagerCommand('功能', MANAGER_ID);
     expect(reply).toContain('請假');
     expect(reply).toContain('長期請假列表');
-    expect(reply).toContain('YYYY/MM/DD');
+    // 起訖範例出現在 example 行
+    expect(reply).toContain('2026/08/01');
+  });
+
+  test('分組標題出現', async () => {
+    const reply = await mc.handleManagerCommand('功能', MANAGER_ID);
+    expect(reply).toContain('【進度查詢｜每日】');
+    expect(reply).toContain('【進度查詢｜每週】');
+    expect(reply).toContain('【進度查詢｜每月】');
+    expect(reply).toContain('【請假查詢】');
+    expect(reply).toContain('【成員管理（主管）】');
+    expect(reply).toContain('【長期請假（主管）】');
+    expect(reply).toContain('【說明】');
   });
 });

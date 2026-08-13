@@ -502,9 +502,10 @@ async function handleEvent(event, client) {
   let replyText;
 
   try {
-    // ========== 主管指令（最高優先，含兩段式互動狀態） ==========
-    // 主管本人：交給 managerCommands 處理（有處理則直接回覆）
-    if (managerCommands.isManager(userId)) {
+    // ========== 主管指令 & 「功能」清單（最高優先） ==========
+    // handleManagerCommand 對所有人開放「功能」類清單（依角色過濾），
+    // 其他寫入型指令僅主管會被處理，非主管回 null → 若命中限制關鍵字則統一擋下
+    {
       const managerReply = await managerCommands.handleManagerCommand(text, userId);
       if (managerReply) {
         await client.replyMessage({
@@ -513,14 +514,13 @@ async function handleEvent(event, client) {
         });
         return;
       }
-      // 主管未觸發指令 → 繼續走原本流程
-    } else if (managerCommands.isRestrictedKeyword(text)) {
-      // 非主管誤觸「新增成員／移除成員／成員列表」→ 直接擋下
-      await client.replyMessage({
-        replyToken,
-        messages: [{ type: 'text', text: '此為主管專用指令。' }],
-      });
-      return;
+      if (!managerCommands.isManager(userId) && managerCommands.isRestrictedKeyword(text)) {
+        await client.replyMessage({
+          replyToken,
+          messages: [{ type: 'text', text: '此為主管專用指令。輸入「功能」可查看你能用的指令。' }],
+        });
+        return;
+      }
     }
 
     // ========== 未登記使用者被動通知（僅私訊；不改變原流程） ==========
