@@ -303,6 +303,15 @@ async function getLeaveExceptionsForDate(dateStr) {
   return all.filter(ex => ex.startDate <= dateStr && dateStr <= ex.endDate);
 }
 
+// 新增請假例外；成功後清快取讓下次讀取立即生效
+async function addLeaveException({ name, lineUserId, leaveType, startDate, endDate, note }) {
+  const ok = await appendRow('請假例外', [
+    name, lineUserId || '', leaveType, startDate, endDate, note || '',
+  ]);
+  if (ok) cache.leaveExceptions = { data: null, at: 0 };
+  return ok;
+}
+
 // 完整成員資料（姓名 + LINE_User_ID），供以 ID 為主鍵的比對使用
 async function getAllMembers() {
   const rows = await readRange('成員名單!A:B');
@@ -579,6 +588,7 @@ module.exports = {
   getHolidaySet,
   getAllLeaveExceptions,
   getLeaveExceptionsForDate,
+  addLeaveException,
   addMember,
   removeMemberByName,
   removeMemberById,

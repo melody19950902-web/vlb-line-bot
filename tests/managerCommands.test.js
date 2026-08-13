@@ -1,7 +1,8 @@
 'use strict';
 
-// 記憶體版成員名單，測試中可讀寫
+// 記憶體版成員名單 & 請假例外，測試中可讀寫
 let mockMembers = [];
+let mockLeaveExceptions = [];
 
 jest.mock('../src/sheets', () => ({
   getAllMembers:        jest.fn(async () => mockMembers.map(m => ({ ...m }))),
@@ -17,6 +18,11 @@ jest.mock('../src/sheets', () => ({
     if (idx === -1) return null;
     const [removed] = mockMembers.splice(idx, 1);
     return removed;
+  }),
+  getAllLeaveExceptions: jest.fn(async () => mockLeaveExceptions.map(e => ({ ...e }))),
+  addLeaveException:     jest.fn(async ({ name, lineUserId, leaveType, startDate, endDate, note }) => {
+    mockLeaveExceptions.push({ name, lineUserId, leaveType, startDate, endDate, note: note || '' });
+    return true;
   }),
   getTaiwanDateString:  jest.fn().mockReturnValue('2026/08/14'),
 }));
@@ -34,6 +40,7 @@ beforeEach(() => {
     { name: '阿啾', id: 'U1604db7615d2864557e6110e981ef503' },
     { name: '小芯', id: 'Ud91255d03cf309eaa6d8051cfe291492' },
   ];
+  mockLeaveExceptions = [];
   mc._resetStateForTest();
 });
 
@@ -56,8 +63,12 @@ describe('權限', () => {
     expect(mc.isRestrictedKeyword('新增成員')).toBe(true);
     expect(mc.isRestrictedKeyword('移除成員')).toBe(true);
     expect(mc.isRestrictedKeyword('成員列表')).toBe(true);
+    expect(mc.isRestrictedKeyword('長期請假列表')).toBe(true);
+    expect(mc.isRestrictedKeyword('請假 阿啾 特休 2026/08/01 2026/08/02')).toBe(true);
     expect(mc.isRestrictedKeyword('功能')).toBe(false);
     expect(mc.isRestrictedKeyword('help')).toBe(false);
+    // 「請假」單獨（沒空格接參數）不擋，避免和小編的請假關鍵字衝突
+    expect(mc.isRestrictedKeyword('請假')).toBe(false);
   });
 });
 
@@ -264,5 +275,123 @@ describe('狀態管理', () => {
     const done = await mc.handleManagerCommand(`Y ${VALID_ID}`, MANAGER_ID);
     expect(done).toContain('✅ 已新增成員：Y');
     process.env.MANAGER_USER_IDS = MANAGER_ID; // 還原
+  });
+});
+
+// ============================================================
+// 長期請假指令
+// ============================================================
+describe('長期請假指令', () => {
+  test('用姓名 + 完整參數 → 寫入請假例外', async () => {
+    const reply = await mc.handleManagerCommand('請假 阿啾 特休 2026/08/12 2026/08/13', MANAGER_ID);
+    expect(reply).toContain('✅ 已登記長期請假');
+    expect(reply).toContain('阿啾');
+    expect(reply).toContain('特休');
+    expect(reply).toContain('2026/08/12 ~ 2026/08/13');
+    expect(mockLeaveExceptions).toHaveLength(1);
+    expect(mockLeaveExceptions[0]).toEqual({
+      name: '阿啾', lineUserId: 'U1604db7615d2864557e6110e981ef503',
+      leaveType: '特休', startDate: '2026/08/12', endDate: '2026/08/13', note: '',
+    });
+  });
+
+  test('備註可含多個字（含空格）', async () => {
+    const reply = await mc.handleManagerCommand('請假 阿啾 特休 2026/08/12 2026/08/13 家庭 事務', MANAGER_ID);
+    expect(reply).toContain('家庭 事務');
+    expect(mockLeaveExceptions[0].note).toBe('家庭 事務');
+  });
+
+  test('用 ID 也可以', async () => {
+    const reply = await mc.handleManagerCommand('請假 U1604db7615d2864557e6110e981ef503 特休 2026/08/12 2026/08/13', MANAGER_ID);
+    expect(reply).toContain('✅');
+    expect(mockLeaveExceptions[0].name).toBe('阿啾');
+    expect(mockLeaveExceptions[0].lineUserId).toBe('U1604db7615d2864557e6110e981ef503');
+  });
+
+  test('全形空格分隔也能解析', async () => {
+    const reply = await mc.handleManagerCommand('請假　阿啾　特休　2026/08/12　2026/08/13', MANAGER_ID);
+    expect(reply).toContain('✅');
+    expect(mockLeaveExceptions).toHaveLength(1);
+  });
+
+  test('找不到成員 → 錯誤、不寫入', async () => {
+    const reply = await mc.handleManagerCommand('請假 不存在 特休 2026/08/12 2026/08/13', MANAGER_ID);
+    expect(reply).toContain('❌');
+    expect(reply).toContain('找不到成員');
+    expect(mockLeaveExceptions).toHaveLength(0);
+  });
+
+  test('假別不合法 → 錯誤、列出可用假別', async () => {
+    const reply = await mc.handleManagerCommand('請假 阿啾 亂七八糟假 2026/08/12 2026/08/13', MANAGER_ID);
+    expect(reply).toContain('❌');
+    expect(reply).toContain('公假');
+    expect(mockLeaveExceptions).toHaveLength(0);
+  });
+
+  test('日期格式錯誤 → 錯誤', async () => {
+    const reply = await mc.handleManagerCommand('請假 阿啾 特休 8/12 8/13', MANAGER_ID);
+    expect(reply).toContain('❌');
+    expect(reply).toContain('YYYY/MM/DD');
+    expect(mockLeaveExceptions).toHaveLength(0);
+  });
+
+  test('開始日期晚於結束日期 → 錯誤', async () => {
+    const reply = await mc.handleManagerCommand('請假 阿啾 特休 2026/08/13 2026/08/12', MANAGER_ID);
+    expect(reply).toContain('❌');
+    expect(reply).toContain('晚於結束');
+    expect(mockLeaveExceptions).toHaveLength(0);
+  });
+
+  test('欄位不足 → 錯誤', async () => {
+    const reply = await mc.handleManagerCommand('請假 阿啾 特休', MANAGER_ID);
+    expect(reply).toContain('❌');
+    expect(reply).toContain('欄位不足');
+  });
+
+  test('非主管傳「請假 ...」→ handleManagerCommand 回 null（讓 lineHandler 決定擋下）', async () => {
+    const reply = await mc.handleManagerCommand('請假 阿啾 特休 2026/08/12 2026/08/13', OTHER_ID);
+    expect(reply).toBeNull();
+    expect(mockLeaveExceptions).toHaveLength(0);
+  });
+
+  test('非主管單獨傳「請假」→ 不視為主管指令（保留小編請假語意）', () => {
+    expect(mc.isRestrictedKeyword('請假')).toBe(false);
+  });
+});
+
+// ============================================================
+// 長期請假列表
+// ============================================================
+describe('長期請假列表', () => {
+  test('空白時提示', async () => {
+    const reply = await mc.handleManagerCommand('長期請假列表', MANAGER_ID);
+    expect(reply).toContain('沒有任何');
+  });
+
+  test('有資料時列出', async () => {
+    mockLeaveExceptions = [
+      { name: '阿啾',  lineUserId: 'U1',  leaveType: '特休', startDate: '2026/08/12', endDate: '2026/08/13', note: '' },
+      { name: '吻仔魚', lineUserId: 'U2', leaveType: '公假', startDate: '2026/08/01', endDate: '2026/08/16', note: '8/17 回來' },
+    ];
+    const reply = await mc.handleManagerCommand('長期請假列表', MANAGER_ID);
+    expect(reply).toContain('共 2 筆');
+    expect(reply).toContain('阿啾');
+    expect(reply).toContain('特休');
+    expect(reply).toContain('2026/08/12 ~ 2026/08/13');
+    expect(reply).toContain('吻仔魚');
+    expect(reply).toContain('公假');
+    expect(reply).toContain('8/17 回來');
+  });
+});
+
+// ============================================================
+// 功能清單包含新指令
+// ============================================================
+describe('功能清單', () => {
+  test('顯示長期請假與請假列表', async () => {
+    const reply = await mc.handleManagerCommand('功能', MANAGER_ID);
+    expect(reply).toContain('請假');
+    expect(reply).toContain('長期請假列表');
+    expect(reply).toContain('YYYY/MM/DD');
   });
 });

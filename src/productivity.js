@@ -1,24 +1,41 @@
 'use strict';
 const {
   getWeeklyLogs, getSopSettings, getAllMemberNames, getAllMembers,
-  getLeaveRecordsThisWeek, getHolidaySet, getTaiwanDateString,
+  getLeaveRecordsThisWeek, getAllLeaveExceptions, getHolidaySet, getTaiwanDateString,
 } = require('./sheets');
 
-// 本週（週一~週五）落在國定假日的天數
-function countHolidayWeekdays(holidays) {
+// 本週週一~週五的日期陣列（台灣時間）
+function weekWeekdays() {
   const taiwanNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Taipei' }));
   const dow = taiwanNow.getDay(); // 0=Sun
-  // 找本週一
   const monOffset = dow === 0 ? -6 : 1 - dow;
   const monday = new Date();
   monday.setDate(monday.getDate() + monOffset);
-  let h = 0;
+  const days = [];
   for (let i = 0; i < 5; i++) {
     const d = new Date(monday);
     d.setDate(monday.getDate() + i);
-    if (holidays.has(getTaiwanDateString(d))) h++;
+    days.push(getTaiwanDateString(d));
   }
-  return h;
+  return days;
+}
+
+// 本週（週一~週五）落在國定假日的天數
+function countHolidayWeekdays(holidays) {
+  return weekWeekdays().filter(d => holidays.has(d)).length;
+}
+
+// 依「請假例外」計算某人本週落在該人區間內的工作日天數（Mon–Fri）
+function countExceptionWeekdays(name, id, exceptions, weekdays) {
+  let n = 0;
+  for (const ex of exceptions) {
+    const matched = (id && ex.lineUserId === id) || (!ex.lineUserId && ex.name === name);
+    if (!matched) continue;
+    for (const d of weekdays) {
+      if (d >= ex.startDate && d <= ex.endDate) n++;
+    }
+  }
+  return n;
 }
 
 // ============================================================
@@ -29,18 +46,20 @@ function countHolidayWeekdays(holidays) {
 // needC = round(每週最低輪播數 * (5 - h - 請假天數) / 5)，下限 0
 // ============================================================
 async function computeWeeklyProductivity() {
-  const [logs, allMemberNames, members, sop, leaves, holidays] = await Promise.all([
+  const [logs, allMemberNames, members, sop, leaves, exceptions, holidays] = await Promise.all([
     getWeeklyLogs(),
     getAllMemberNames(),
     getAllMembers(),
     getSopSettings(),
     getLeaveRecordsThisWeek(),
+    getAllLeaveExceptions(),
     getHolidaySet(),
   ]);
 
   const minV = parseFloat(sop['每週最低影片數'] || '12');
   const minC = parseFloat(sop['每週最低輪播數'] || '6');
   const holidayDays = countHolidayWeekdays(holidays);
+  const weekdays = weekWeekdays();
 
   // 每人每天取最後一筆的影片數量與輪播數量
   const latestPerDay = new Map(); // `${name}|${date}` → { v, c }
@@ -73,11 +92,17 @@ async function computeWeeklyProductivity() {
     leaveByName.set(name, (leaveByName.get(name) || 0) + days);
   }
 
+  // 姓名 → id 對照，用於請假例外比對
+  const nameToId = new Map(members.filter(m => m.name).map(m => [m.name, m.id]));
+
   return allMemberNames.map(rawName => {
     const name = rawName.trim();
     const s = totals.get(name) || { videos: 0, carousels: 0 };
     const leaveDaysRaw = leaveByName.get(name) || 0;
-    const leaveDays = Math.round(leaveDaysRaw * 10) / 10; // 一位小數
+    // 疊加「請假例外」在本週的重疊工作日
+    const exceptionDays = countExceptionWeekdays(name, nameToId.get(name), exceptions, weekdays);
+    const totalLeave = leaveDaysRaw + exceptionDays;
+    const leaveDays = Math.round(totalLeave * 10) / 10; // 一位小數
     const availableDays = Math.max(0, 5 - holidayDays - leaveDays);
     const needV = Math.max(0, Math.round(minV * availableDays / 5));
     const needC = Math.max(0, Math.round(minC * availableDays / 5));
