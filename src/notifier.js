@@ -2,6 +2,7 @@
 const nodemailer = require('nodemailer');
 const {
   getTodayLogs, getAllMemberNames, getAllMembers, getLeaveRecordsForDate,
+  getLeaveExceptionsForDate,
   getTaiwanDateString, getTaiwanTimeString,
   saveWorkLog, saveLeaveRecord, getTodayPublishReports,
   saveMonthlyRecord, getMonthlyAnomalies, getTaiwanMonthString,
@@ -196,10 +197,11 @@ function isTaiwanSunday() {
 async function sendSaturdaySummary(client) {
   const today = getTaiwanDateString();
 
-  const [allMembers, members, leaveRecords, publishReportMap] = await Promise.all([
+  const [allMembers, members, leaveRecords, leaveExceptions, publishReportMap] = await Promise.all([
     getAllMemberNames(),
     getAllMembers(),
     getLeaveRecordsForDate(today),
+    getLeaveExceptionsForDate(today),
     getTodayPublishReports(),
   ]);
 
@@ -209,6 +211,11 @@ async function sendSaturdaySummary(client) {
   for (const r of leaveRecords) {
     const name = idToName.get((r[3] || '').trim()) || (r[2] || '').trim();
     if (name) leaveTypeMap.set(name, r[4] || '請假');
+  }
+  // 疊加「請假例外」（主管手動長期區間）；已在 leaveTypeMap 者不覆蓋
+  for (const ex of leaveExceptions) {
+    const name = idToName.get(ex.lineUserId) || ex.name;
+    if (name && !leaveTypeMap.has(name)) leaveTypeMap.set(name, ex.leaveType);
   }
 
   const header = [`📢 VLB 週六發布查核 ${today}`, ``];
@@ -270,16 +277,18 @@ async function sendDailySummary(client) {
   const today = getTaiwanDateString();
   const month = getTaiwanMonthString();
 
-  const [logs, allMembers, members, leaveRecords, publishReportMap, sopSettings] = await Promise.all([
+  const [logs, allMembers, members, leaveRecords, leaveExceptions, publishReportMap, sopSettings] = await Promise.all([
     getTodayLogs(),
     getAllMemberNames(),
     getAllMembers(),
     getLeaveRecordsForDate(today),
+    getLeaveExceptionsForDate(today),
     getTodayPublishReports(),
     getSopSettings(),
   ]);
 
   console.log(`📂 [請假記錄] 今日(${today})共 ${leaveRecords.length} 筆請假記錄：${leaveRecords.map(r => r[2]).join('、') || '無'}`);
+  console.log(`📂 [請假例外] 今日(${today})共 ${leaveExceptions.length} 筆長期請假：${leaveExceptions.map(ex => `${ex.name}(${ex.leaveType})`).join('、') || '無'}`);
 
   // ID 優先的請假對照表：name → { type, hours }（姓名一律 trim）
   const idToName = new Map(members.filter(m => m.id).map(m => [m.id, m.name]));
@@ -287,6 +296,11 @@ async function sendDailySummary(client) {
   for (const r of leaveRecords) {
     const name = idToName.get((r[3] || '').trim()) || (r[2] || '').trim();
     if (name) leaveMap.set(name, { type: r[4] || '請假', hours: parseFloat(r[5]) || 0 });
+  }
+  // 疊加「請假例外」（主管手動長期區間）；已在 leaveMap 者不覆蓋（優先當日 LINE 訊息）
+  for (const ex of leaveExceptions) {
+    const name = idToName.get(ex.lineUserId) || ex.name;
+    if (name && !leaveMap.has(name)) leaveMap.set(name, { type: ex.leaveType, hours: 0 });
   }
   // 補休時數：只有補休且有指定時數（如半天 4 小時）才回傳 > 0；整天補休回 0
   const compHoursOf = (name) => {

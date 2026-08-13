@@ -7,10 +7,11 @@ const { google } = require('googleapis');
 // ============================================================
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const cache = {
-  sopSettings:   { data: null, at: 0 },
-  taskTimeRules: { data: null, at: 0 },
-  dayTypeRules:  { data: null, at: 0 },
-  holidays:      { data: null, at: 0 },
+  sopSettings:      { data: null, at: 0 },
+  taskTimeRules:    { data: null, at: 0 },
+  dayTypeRules:     { data: null, at: 0 },
+  holidays:         { data: null, at: 0 },
+  leaveExceptions:  { data: null, at: 0 },
 };
 
 // ============================================================
@@ -68,7 +69,7 @@ const DEFAULT_DAY_TYPE_RULES = [
   { 工作類型: '大型活動日',           最低影片數: 1 },
 ];
 
-const DEFAULT_MEMBERS = ['阿啾', '小芯', '小柯', '吻仔魚', '佳玲'];
+const DEFAULT_MEMBERS = ['阿啾', '小芯', '吻仔魚', '佳玲'];
 
 // ============================================================
 // Google Sheets 認證與基本操作
@@ -225,6 +226,41 @@ async function getHolidaySet() {
   }
   cache.holidays = { data: set, at: now };
   return set;
+}
+
+// 請假例外（主管手動設定的長期請假區間）
+// 欄位：姓名 | LINE_User_ID | 假別 | 開始日期 | 結束日期 | 備註
+// 回傳陣列，每項含 { name, lineUserId, leaveType, startDate, endDate, note }
+async function getAllLeaveExceptions() {
+  const now = Date.now();
+  if (cache.leaveExceptions.data && now - cache.leaveExceptions.at < CACHE_TTL_MS) {
+    return cache.leaveExceptions.data;
+  }
+  const rows = await readRange('請假例外!A:F');
+  const result = [];
+  if (rows && rows.length >= 2) {
+    for (const r of rows.slice(1)) {
+      const startDate = (r[3] || '').trim();
+      const endDate   = (r[4] || '').trim();
+      if (!startDate || !endDate) continue;
+      result.push({
+        name:       (r[0] || '').trim(),
+        lineUserId: (r[1] || '').trim(),
+        leaveType:  (r[2] || '請假').trim(),
+        startDate,
+        endDate,
+        note:       (r[5] || '').trim(),
+      });
+    }
+  }
+  cache.leaveExceptions = { data: result, at: now };
+  return result;
+}
+
+// 取指定日期落在區間內（含起訖）的請假例外
+async function getLeaveExceptionsForDate(dateStr) {
+  const all = await getAllLeaveExceptions();
+  return all.filter(ex => ex.startDate <= dateStr && dateStr <= ex.endDate);
 }
 
 // 完整成員資料（姓名 + LINE_User_ID），供以 ID 為主鍵的比對使用
@@ -501,6 +537,8 @@ module.exports = {
   getAllMemberNames,
   getAllMembers,
   getHolidaySet,
+  getAllLeaveExceptions,
+  getLeaveExceptionsForDate,
   saveWorkLog,
   getTodayLogs,
   getWeeklyLogs,

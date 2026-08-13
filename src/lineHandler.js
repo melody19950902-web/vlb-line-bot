@@ -1,8 +1,9 @@
 'use strict';
 const Anthropic = require('@anthropic-ai/sdk');
-const { parseWorkLog, detectSpecialDayType } = require('./analyzer');
+const { parseWorkLog, detectSpecialDayType, analyzeWorkLog, applyCompLeaveAdjustment } = require('./analyzer');
 const { saveWorkLog, savePublishReport, saveLeaveRecord, saveEditProgress, getMemberName,
         getLeaveRecordForUserOnDate, deleteLeaveRecordForUserOnDate,
+        getSopSettings,
         getTaiwanDateString, getTaiwanTimeString }           = require('./sheets');
 
 const { handleCommand }                                      = require('./commands');
@@ -268,8 +269,13 @@ async function getMemberDisplayName(userId, client, source) {
 }
 
 // ============================================================
-// 工作日誌處理流程（格式檢查後靜默儲存，22:30 統一查核）
+// 工作日誌處理流程
+// 22:30 前：靜默寫入 pending，22:30 統一查核
+// 22:30 後（晚報）：立即分析並寫入最終狀態，備註標「晚報/加班」
+//   → 避免 pending 卡死，且 22:30 已發過的通知不會遺漏這筆
 // ============================================================
+
+const LATE_CUTOFF = '22:30';
 
 async function processWorkLog(text, userId, client, source) {
   const parsedLog = parseWorkLog(text);
@@ -282,18 +288,62 @@ async function processWorkLog(text, userId, client, source) {
   const memberName = await getMemberDisplayName(userId, client, source);
   const date       = getTaiwanDateString();
   const time       = getTaiwanTimeString();
+  const isLate     = time >= LATE_CUTOFF;
 
-  await saveWorkLog({
-    date, time, name: memberName, lineUserId: userId,
-    dayType:    parsedLog.dayType    || '未知',
-    videoCount: parsedLog.videoCount ?? 0,
-    carouselCount: parsedLog.carouselCount ?? 0,
-    timeLog:    parsedLog.timeLogRaw || text,
-    status: 'pending',
-    anomalies: [], notes: parsedLog.notes || '',
-  });
+  const baseNotes = parsedLog.notes || '';
+  const lateTag   = '晚報/加班';
+  const notes     = isLate
+    ? (baseNotes ? `${baseNotes}｜${lateTag}` : lateTag)
+    : baseNotes;
 
-  return null; // 全天靜默收資料，22:30 統一查核
+  if (!isLate) {
+    await saveWorkLog({
+      date, time, name: memberName, lineUserId: userId,
+      dayType:    parsedLog.dayType    || '未知',
+      videoCount: parsedLog.videoCount ?? 0,
+      carouselCount: parsedLog.carouselCount ?? 0,
+      timeLog:    parsedLog.timeLogRaw || text,
+      status: 'pending',
+      anomalies: [], notes,
+    });
+    return null; // 22:30 前一律靜默
+  }
+
+  // 晚報：立即分析，寫入最終狀態
+  try {
+    const analysis = await analyzeWorkLog(parsedLog, memberName);
+    const logComp = parsedLog.compHours || 0;
+    let finalAnalysis = analysis;
+    if (logComp > 0) {
+      const sop = await getSopSettings();
+      const minHours = parseFloat(sop['最低工時_小時'] || '6');
+      finalAnalysis = applyCompLeaveAdjustment(analysis, parsedLog, { compHours: logComp, minHours });
+    }
+    await saveWorkLog({
+      date, time, name: memberName, lineUserId: userId,
+      dayType:    parsedLog.dayType,
+      videoCount: parsedLog.videoCount,
+      carouselCount: parsedLog.carouselCount || 0,
+      timeLog:    parsedLog.timeLogRaw || text,
+      status:     finalAnalysis.status,
+      anomalies:  finalAnalysis.anomalies,
+      notes,
+    });
+    console.log(`🌙 [晚報] ${memberName} @ ${time} 已即時分析 → ${finalAnalysis.status}`);
+  } catch (err) {
+    console.error(`🌙 [晚報] 即時分析失敗，回退 pending（${memberName}）：`, err.message);
+    await saveWorkLog({
+      date, time, name: memberName, lineUserId: userId,
+      dayType:    parsedLog.dayType    || '未知',
+      videoCount: parsedLog.videoCount ?? 0,
+      carouselCount: parsedLog.carouselCount ?? 0,
+      timeLog:    parsedLog.timeLogRaw || text,
+      status: 'pending',
+      anomalies: [], notes,
+    });
+  }
+
+  return null; // 靜默接收；主管視需要查看工作記錄
 }
 
 // ============================================================
